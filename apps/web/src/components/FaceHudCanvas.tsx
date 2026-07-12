@@ -18,10 +18,17 @@ export function FaceHudCanvas({
     const canvas = ref.current;
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
+    const physicalW = Math.max(1, Math.round(width * dpr));
+    const physicalH = Math.max(1, Math.round(height * dpr));
+
+    // Resize backing store only when physical size actually changes.
+    if (canvas.width !== physicalW || canvas.height !== physicalH) {
+      canvas.width = physicalW;
+      canvas.height = physicalH;
+    }
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

@@ -551,23 +551,75 @@ pub struct EmployeeRow {
 }
 
 pub async fn list_employees(pool: &SqlitePool, q: Option<&str>) -> Result<Vec<serde_json::Value>> {
+    // ponytail: bounded <50 employee list; paginate/batch IDs only if scope grows
+    // Fixed three-query shape (employees + images + embeddings), not 1+3N via employee_dict.
+    use std::collections::HashMap;
+
     let rows = sqlx::query(
         "SELECT id, employee_code, full_name, department, is_active FROM employees ORDER BY full_name",
     )
     .fetch_all(pool)
     .await?;
-    let mut out = Vec::new();
+
+    let mut selected: Vec<(i64, String, String, Option<String>, bool)> = Vec::new();
     for r in rows {
         let id: i64 = r.get("id");
         let code: String = r.get("employee_code");
         let name: String = r.get("full_name");
+        let department: Option<String> = r.get("department");
+        let is_active = r.get::<i64, _>("is_active") != 0;
         if let Some(qq) = q {
             let ql = qq.to_lowercase();
             if !name.to_lowercase().contains(&ql) && !code.to_lowercase().contains(&ql) {
                 continue;
             }
         }
-        out.push(employee_dict(pool, id).await?);
+        selected.push((id, code, name, department, is_active));
+    }
+
+    // Fetch all image/embedding rows once and group (acceptable at sub-50 scale).
+    let image_rows = sqlx::query(
+        "SELECT id, employee_id, file_path, usable, reject_reason FROM employee_images ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let emb_rows = sqlx::query("SELECT employee_id, num_images_used FROM employee_embeddings")
+        .fetch_all(pool)
+        .await?;
+
+    let mut images_by_emp: HashMap<i64, Vec<serde_json::Value>> = HashMap::new();
+    for i in image_rows {
+        let emp_id: i64 = i.get("employee_id");
+        images_by_emp.entry(emp_id).or_default().push(serde_json::json!({
+            "id": i.get::<i64,_>("id"),
+            "file_path": i.get::<String,_>("file_path"),
+            "usable": i.get::<i64,_>("usable") != 0,
+            "reject_reason": i.get::<Option<String>,_>("reject_reason"),
+        }));
+    }
+
+    let mut emb_by_emp: HashMap<i64, i64> = HashMap::new();
+    for e in emb_rows {
+        emb_by_emp.insert(e.get("employee_id"), e.get("num_images_used"));
+    }
+
+    let mut out = Vec::with_capacity(selected.len());
+    for (id, code, name, department, is_active) in selected {
+        let imgs = images_by_emp.remove(&id).unwrap_or_default();
+        let usable = imgs.iter().filter(|i| i["usable"].as_bool() == Some(true)).count();
+        let emb = emb_by_emp.get(&id);
+        out.push(serde_json::json!({
+            "id": id,
+            "employee_code": code,
+            "full_name": name,
+            "department": department,
+            "is_active": is_active,
+            "image_count": imgs.len(),
+            "usable_images": usable,
+            "embedding_ready": emb.is_some(),
+            "num_images_used": emb.copied().unwrap_or(0),
+            "images": imgs,
+        }));
     }
     Ok(out)
 }
@@ -1767,5 +1819,171 @@ mod metrics_and_commit_tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod list_employees_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings() -> (Settings, PathBuf, PathBuf) {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("pksp-db-list-emp-{id}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("test.db");
+        let mut s = Settings::from_env();
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        s.database_url = format!("sqlite:////{abs}?mode=rwc");
+        s.data_dir = data_dir.clone();
+        s.camera_upsert = true;
+        s.cam_out_rtsp = String::new();
+        (s, data_dir, db_path)
+    }
+
+    async fn add_image(
+        pool: &SqlitePool,
+        employee_id: i64,
+        path: &str,
+        usable: bool,
+        reason: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO employee_images(employee_id, file_path, usable, reject_reason, created_at)
+             VALUES(?,?,?,?,datetime('now'))",
+        )
+        .bind(employee_id)
+        .bind(path)
+        .bind(if usable { 1 } else { 0 })
+        .bind(reason)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn add_embedding(pool: &SqlitePool, employee_id: i64, n: i64) {
+        sqlx::query(
+            "INSERT INTO employee_embeddings(employee_id, dim, vector, num_images_used, model_name, updated_at)
+             VALUES(?,?,?,?,?,datetime('now'))",
+        )
+        .bind(employee_id)
+        .bind(8_i64)
+        .bind(vec![0u8; 8])
+        .bind(n)
+        .bind("buffalo_l")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_employees_empty_one_and_many_shapes() {
+        let (settings, data_dir, db_path) = temp_settings();
+        let pool = connect_pool(&settings).await.unwrap();
+
+        let empty = list_employees(&pool, None).await.unwrap();
+        assert!(empty.is_empty());
+
+        let a = create_employee(&pool, "A1", "Alice", Some("Finance"))
+            .await
+            .unwrap();
+        add_image(&pool, a, "a1.jpg", true, None).await;
+        add_image(&pool, a, "a2.jpg", false, Some("no_face")).await;
+        add_embedding(&pool, a, 1).await;
+
+        let one = list_employees(&pool, None).await.unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0]["id"], a);
+        assert_eq!(one[0]["employee_code"], "A1");
+        assert_eq!(one[0]["full_name"], "Alice");
+        assert_eq!(one[0]["department"], "Finance");
+        assert_eq!(one[0]["is_active"], true);
+        assert_eq!(one[0]["image_count"], 2);
+        assert_eq!(one[0]["usable_images"], 1);
+        assert_eq!(one[0]["embedding_ready"], true);
+        assert_eq!(one[0]["num_images_used"], 1);
+        assert_eq!(one[0]["images"].as_array().unwrap().len(), 2);
+
+        // Detail dict parity for the single row.
+        let detail = employee_dict(&pool, a).await.unwrap();
+        assert_eq!(one[0]["image_count"], detail["image_count"]);
+        assert_eq!(one[0]["usable_images"], detail["usable_images"]);
+        assert_eq!(one[0]["embedding_ready"], detail["embedding_ready"]);
+        assert_eq!(one[0]["num_images_used"], detail["num_images_used"]);
+        assert_eq!(
+            one[0]["images"].as_array().unwrap().len(),
+            detail["images"].as_array().unwrap().len()
+        );
+
+        let b = create_employee(&pool, "B1", "Bob", None).await.unwrap();
+        // No images/embedding for Bob.
+        let c = create_employee(&pool, "C1", "Cara", Some("Ops"))
+            .await
+            .unwrap();
+        update_employee_fields(
+            &pool,
+            c,
+            EmployeePatch {
+                full_name: None,
+                department: None,
+                is_active: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        add_image(&pool, c, "c.jpg", true, None).await;
+
+        let many = list_employees(&pool, None).await.unwrap();
+        // Alphabetical by full_name: Alice, Bob, Cara
+        assert_eq!(many.len(), 3);
+        assert_eq!(many[0]["full_name"], "Alice");
+        assert_eq!(many[1]["full_name"], "Bob");
+        assert_eq!(many[2]["full_name"], "Cara");
+        assert_eq!(many[1]["image_count"], 0);
+        assert_eq!(many[1]["usable_images"], 0);
+        assert_eq!(many[1]["embedding_ready"], false);
+        assert_eq!(many[1]["num_images_used"], 0);
+        assert_eq!(many[1]["images"].as_array().unwrap().len(), 0);
+        assert_eq!(many[2]["is_active"], false);
+        assert_eq!(many[2]["image_count"], 1);
+        assert_eq!(many[2]["embedding_ready"], false);
+
+        // Search filters name/code (existing server contract; not department).
+        let by_name = list_employees(&pool, Some("bob")).await.unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0]["id"], b);
+        let by_code = list_employees(&pool, Some("a1")).await.unwrap();
+        assert_eq!(by_code.len(), 1);
+        assert_eq!(by_code[0]["employee_code"], "A1");
+        let by_dept = list_employees(&pool, Some("finance")).await.unwrap();
+        assert!(by_dept.is_empty(), "server list does not search department");
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn list_employees_source_does_not_call_employee_dict() {
+        let src = include_str!("lib.rs");
+        // Locate the list_employees function body (until next pub async fn).
+        let start = src
+            .find("pub async fn list_employees")
+            .expect("list_employees present");
+        let rest = &src[start..];
+        let end = rest
+            .find("\npub async fn employee_dict")
+            .expect("employee_dict follows list");
+        let body = &rest[..end];
+        assert!(
+            !body.contains("employee_dict("),
+            "list_employees must not call employee_dict"
+        );
     }
 }
