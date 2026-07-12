@@ -30,13 +30,18 @@ export default function EmployeeDetailPage() {
   const [department, setDepartment] = useState("");
   const [isActive, setIsActive] = useState(true);
 
+  /** Apply server-confirmed employee into form (load + successful PATCH only). */
+  function applyServerEmployee(data: Employee) {
+    setEmp(data);
+    setFullName(data.full_name);
+    setDepartment(data.department ?? "");
+    setIsActive(data.is_active);
+  }
+
   const load = useCallback(async () => {
     try {
       const data = await api<Employee>(`/api/employees/${id}`);
-      setEmp(data);
-      setFullName(data.full_name);
-      setDepartment(data.department ?? "");
-      setIsActive(data.is_active);
+      applyServerEmployee(data);
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
@@ -46,14 +51,6 @@ export default function EmployeeDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
-
-  // Keep form in sync if emp is replaced by a successful PATCH without load().
-  useEffect(() => {
-    if (!emp) return;
-    setFullName(emp.full_name);
-    setDepartment(emp.department ?? "");
-    setIsActive(emp.is_active);
-  }, [emp]);
 
   async function saveProfile(e: FormEvent) {
     e.preventDefault();
@@ -85,7 +82,8 @@ export default function EmployeeDetailPage() {
         method: "PATCH",
         body: JSON.stringify(body),
       });
-      setEmp(updated);
+      // Only re-sync form from server on success — never wipe drafts on error.
+      applyServerEmployee(updated);
       setStatusMsg("Employee profile saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");

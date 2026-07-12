@@ -49,12 +49,12 @@ export CAM_IN_WEBRTC_PATH=demo
 
 # Native H.264 substream → stream-copy into cam_in_h264 (private .env only):
 # export MEDIA_SOURCE_MODE=copy
-# export CAM_IN_H264_RTSP=rtsp://...   # never commit user-info
+# CAM_IN_H264_RTSP — set in private env only; never commit user-info
 # export MEDIA_PUBLISH_PATH=cam_in_h264
 
 # H.265 / high-res → supervised ffmpeg transcode into cam_in_h264:
 # export MEDIA_SOURCE_MODE=transcode
-# export CAM_IN_RTSP=rtsp://...        # vision + transcode source
+# CAM_IN_RTSP — vision + transcode source from private env (no user-info in git)
 
 export MEDIAMTX_API_ADDR=127.0.0.1:9997
 ```
