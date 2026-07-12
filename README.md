@@ -17,7 +17,7 @@ On-prem employee check-in using RTSP cameras and face recognition.
 
 | Layer | Choice |
 |---|---|
-| Web | Next.js 15 + Tailwind (`DESIGN.md` BMW M) |
+| Web | Next.js 16 + Tailwind (`DESIGN.md` BMW M) |
 | API | FastAPI + Uvicorn |
 | Vision | InsightFace `buffalo_l` + ONNX Runtime (or mock for theater) |
 | Match | **NumPy cosine** (not FAISS) |
@@ -160,6 +160,24 @@ The platform detects Raptor Lake-P iGPU and prefers hardware paths when availabl
 - `VISION_ADAPTIVE=true` enables simple self-tuning of interval
 - See `.env.example` and the detailed plan in the session artifacts for full guidance + verification steps.
 - `vainfo` + `intel-media-va-driver-non-free` recommended for confirming VAAPI.
+
+## Active-stack verification
+
+Run these gates against the **Rust edge API** and **Next.js 16** web app (not the legacy Python backend):
+
+```bash
+# Rust (from apps/edge)
+cargo test --locked
+cargo check --all-features --locked
+
+# Web (from apps/web)
+npm run lint
+npm run typecheck
+npm test -- --run
+npm run build
+```
+
+CI (`.github/workflows/ci.yml`) runs the same six commands on push/PR.
 
 ## Design docs
 

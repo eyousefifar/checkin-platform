@@ -126,64 +126,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         media_status,
     };
 
-    use axum::http::{header, HeaderValue, Method};
-    let cors = if settings.cors_origins.iter().any(|o| o == "*") {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PATCH,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-    } else {
-        let origins: Vec<HeaderValue> = settings
-            .cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods([
-                Method::GET,
-                Method::POST,
-                Method::PATCH,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-            .allow_credentials(true)
-    };
-
-    let app = Router::new()
-        .route("/api/health", get(routes::health))
-        .route("/api/auth/login", post(routes::login))
-        .route(
-            "/api/employees",
-            get(routes::list_employees).post(routes::create_employee),
-        )
-        .route(
-            "/api/employees/{id}",
-            get(routes::get_employee).patch(routes::update_employee),
-        )
-        .route(
-            "/api/employees/{id}/images",
-            post(routes::upload_images),
-        )
-        .route(
-            "/api/employees/{id}/recompute-embedding",
-            post(routes::recompute_embedding),
-        )
-        .route("/api/attendance/daily", get(routes::daily))
-        .route("/api/attendance/daily.csv", get(routes::daily_csv))
-        .route("/api/attendance/events", get(routes::events))
-        .route("/api/cameras", get(routes::list_cameras_route))
-        .route("/api/ws/live", get(routes::ws_live))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
+    let app = app(state.clone());
 
     let addr: SocketAddr = settings
         .bind_addr
@@ -209,4 +152,69 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         .await?;
     info!("pksp stopped cleanly");
     Ok(())
+}
+
+/// Build the HTTP router for the given app state.
+///
+/// Safe for in-process tests: does not bind a listener or start media/vision workers.
+pub fn app(state: AppState) -> Router {
+    use axum::http::{header, HeaderValue, Method};
+    let cors = if state.settings.cors_origins.iter().any(|o| o == "*") {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+    } else {
+        let origins: Vec<HeaderValue> = state
+            .settings
+            .cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_credentials(true)
+    };
+
+    Router::new()
+        .route("/api/health", get(routes::health))
+        .route("/api/auth/login", post(routes::login))
+        .route(
+            "/api/employees",
+            get(routes::list_employees).post(routes::create_employee),
+        )
+        .route(
+            "/api/employees/{id}",
+            get(routes::get_employee).patch(routes::update_employee),
+        )
+        .route(
+            "/api/employees/{id}/images",
+            post(routes::upload_images),
+        )
+        .route(
+            "/api/employees/{id}/recompute-embedding",
+            post(routes::recompute_embedding),
+        )
+        .route("/api/attendance/daily", get(routes::daily))
+        .route("/api/attendance/daily.csv", get(routes::daily_csv))
+        .route("/api/attendance/events", get(routes::events))
+        .route("/api/cameras", get(routes::list_cameras_route))
+        .route("/api/ws/live", get(routes::ws_live))
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (active edge)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/edge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/edge -> target
+      - name: cargo test --locked
+        run: cargo test --locked
+      - name: cargo check --all-features --locked
+        run: cargo check --all-features --locked
+
+  web:
+    name: Web (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: npm ci
+        run: npm ci
+      - name: lint
+        run: npm run lint
+      - name: typecheck
+        run: npm run typecheck
+      - name: test
+        run: npm test -- --run
+      - name: build
+        run: npm run build

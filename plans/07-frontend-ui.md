@@ -2,7 +2,7 @@
 
 ## Stack
 
-- Next.js 15 App Router + TypeScript
+- Next.js 16 App Router + TypeScript
 - Tailwind CSS mapped to `DESIGN.md` tokens
 - WebSocket client for live events
 - WebRTC player (MediaMTX WHEP/WHIP or MediaMTX reader API)

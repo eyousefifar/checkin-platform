@@ -3,7 +3,7 @@
 ## 1. Decision
 
 **Do not rewrite the web app in Rust.**  
-`apps/web` remains Next.js 15 + Tailwind + BMW M design.
+`apps/web` remains Next.js 16 + Tailwind + BMW M design.
 
 Rust port succeeds when this UI works against `pksp serve` with minimal env changes.
 
