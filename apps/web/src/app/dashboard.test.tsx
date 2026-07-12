@@ -1,11 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MetricsMsg } from "@/lib/types";
 
 const liveState = vi.hoisted(() => ({
   connected: true,
   detections: {} as Record<string, never>,
-  events: [] as never[],
-  metrics: null as null,
+  events: [] as { event_id: number }[],
+  metrics: null as MetricsMsg | null,
   cameraOnline: {} as Record<string, boolean | undefined>,
 }));
 
@@ -71,5 +72,40 @@ describe("DashboardPage live state", () => {
     expect(screen.getByTestId("camera-tile").getAttribute("data-online")).toBe(
       "online",
     );
+  });
+
+  it("shows em dash for unavailable metrics, not invented zero", () => {
+    liveState.metrics = null;
+    liveState.events = [{ event_id: 1 }, { event_id: 2 }];
+    render(<DashboardPage />);
+    expect(screen.getByTestId("metric-Present").textContent).toBe("—");
+    // Must not fall back to in-memory event ticker length.
+    expect(screen.getByTestId("metric-Events today").textContent).toBe("—");
+  });
+
+  it("renders real persisted zero distinctly from unavailable", () => {
+    liveState.metrics = {
+      type: "metrics",
+      cameras_online: 0,
+      present_count: 0,
+      events_today: 0,
+      vision_fps: {},
+    };
+    render(<DashboardPage />);
+    expect(screen.getByTestId("metric-Present").textContent).toBe("0");
+    expect(screen.getByTestId("metric-Events today").textContent).toBe("0");
+  });
+
+  it("renders non-zero persisted metrics", () => {
+    liveState.metrics = {
+      type: "metrics",
+      cameras_online: 1,
+      present_count: 3,
+      events_today: 7,
+      vision_fps: { cam_in: 4.5 },
+    };
+    render(<DashboardPage />);
+    expect(screen.getByTestId("metric-Present").textContent).toBe("3");
+    expect(screen.getByTestId("metric-Events today").textContent).toBe("7");
   });
 });

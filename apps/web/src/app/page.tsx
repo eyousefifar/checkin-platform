@@ -57,7 +57,10 @@ export default function DashboardPage() {
           value={metrics?.cameras_online ?? (camInOnline === true ? 1 : 0)}
         />
         <MetricPill label="Present" value={metrics?.present_count ?? "—"} />
-        <MetricPill label="Events today" value={metrics?.events_today ?? events.length} />
+        <MetricPill
+          label="Events today"
+          value={metrics?.events_today ?? "—"}
+        />
         <MetricPill label="Vision FPS" value={fps != null ? fps.toFixed(1) : "—"} />
       </div>
 

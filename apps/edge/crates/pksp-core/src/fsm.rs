@@ -51,11 +51,17 @@ impl EventKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     Cooldown,
     NoTransition,
     MinDwell,
+    /// Camera row missing from DB.
+    MissingCamera,
+    /// Employee id not found.
+    MissingEmployee,
+    /// Employee exists but is_active=0.
+    InactiveEmployee,
 }
 
 impl SkipReason {
@@ -64,6 +70,9 @@ impl SkipReason {
             Self::Cooldown => "cooldown",
             Self::NoTransition => "no_transition",
             Self::MinDwell => "min_dwell",
+            Self::MissingCamera => "missing_camera",
+            Self::MissingEmployee => "missing_employee",
+            Self::InactiveEmployee => "inactive_employee",
         }
     }
 }

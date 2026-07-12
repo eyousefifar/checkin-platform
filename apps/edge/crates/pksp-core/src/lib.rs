@@ -25,8 +25,8 @@ pub use quality::{
 };
 pub use scene::{
     bbox_centroid, commit_eligible, default_door_zones, hud_state, motion_direction_hint,
-    point_in_polygon, prefer_commit_track, should_vote, track_zone, trajectory_is_walkby, HudState,
-    Zone, ZoneKind, ZoneMap,
+    point_in_polygon, prefer_commit_track, refine_hud_after_identity, should_vote, track_zone,
+    trajectory_is_walkby, HudState, IdentityAttempt, Zone, ZoneKind, ZoneMap,
 };
 pub use track::{assign_tracks, iou, Detection, Track, TrackerState};
 pub use vote::TrackVote;

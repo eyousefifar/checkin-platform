@@ -12,10 +12,14 @@ pub use scrfd::{
 
 use pksp_core::{
     assign_tracks, commit_eligible, evaluate_vote, hud_state, l2_normalize, match_top1,
-    mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate_extended, should_vote,
-    track_zone, trajectory_is_walkby, Detection, MatchResult, TrackerState, ZoneMap,
+    mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate_extended,
+    refine_hud_after_identity, should_vote, track_zone, trajectory_is_walkby, Detection, HudState,
+    IdentityAttempt, MatchResult, SkipReason, TrackerState, ZoneMap,
 };
-use pksp_db::{commit_identity, load_gallery_matrix, Settings};
+use pksp_db::{
+    commit_identity, daily_attendance_metrics, load_gallery_matrix, local_date_str, CommitOutcome,
+    Settings,
+};
 use serde_json::json;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -24,6 +28,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Semaphore};
 use tracing::{info, warn};
+
+/// Rate-limit metrics query failure logs (monotonic seconds of last emit).
+static METRICS_ERR_LOG_SEC: AtomicU64 = AtomicU64::new(0);
 pub use zones::load_zones_for_camera;
 
 /// WebSocket / hub event (JSON object).
@@ -522,11 +529,12 @@ pub async fn reload_gallery(
     Ok(())
 }
 
+/// Live camera online/FPS projection. Daily attendance counts come from SQLite
+/// at emit time — never treat an in-memory counter as authoritative.
 #[derive(Default)]
 pub struct VisionMetrics {
     pub online: HashMap<String, bool>,
     pub fps: HashMap<String, f64>,
-    pub events_today: u64,
 }
 
 #[derive(Clone)]
@@ -813,7 +821,6 @@ async fn process_loop(
             &zones,
             &pool,
             &tx,
-            &metrics,
         )
         .await;
         drop(permit);
@@ -855,16 +862,57 @@ async fn process_loop(
             metrics.write().unwrap().fps.insert(camera_id.clone(), fps);
             frames = 0;
             fps_t0 = Instant::now();
-            let m = metrics.read().unwrap();
-            let online_n = m.online.values().filter(|v| **v).count();
-            let _ = tx.send(json!({
-                "type": "metrics",
-                "cameras_online": online_n,
-                "present_count": 0,
-                "events_today": m.events_today,
-                "vision_fps": m.fps,
-            }));
+            // ponytail: 1-2 cameras; centralize only if measured DB load matters
+            emit_persisted_metrics(&pool, &settings, &metrics, &tx).await;
         }
+    }
+}
+
+/// Fill the existing WS metrics contract from SQLite for the configured local date.
+///
+/// On DB/timezone/query error: rate-limited warning and skip this emission entirely
+/// (never broadcast a zero-filled invented fallback).
+async fn emit_persisted_metrics(
+    pool: &SqlitePool,
+    settings: &Settings,
+    metrics: &Arc<RwLock<VisionMetrics>>,
+    tx: &broadcast::Sender<WsEvent>,
+) {
+    let day = match local_date_str(chrono::Utc::now(), &settings.app_timezone) {
+        Ok(d) => d,
+        Err(e) => {
+            warn_metrics_error(&e.to_string());
+            return;
+        }
+    };
+    let daily = match daily_attendance_metrics(pool, &day).await {
+        Ok(d) => d,
+        Err(e) => {
+            warn_metrics_error(&e.to_string());
+            return;
+        }
+    };
+    let m = metrics.read().unwrap();
+    let online_n = m.online.values().filter(|v| **v).count();
+    let _ = tx.send(json!({
+        "type": "metrics",
+        "cameras_online": online_n,
+        "present_count": daily.present_count,
+        "events_today": daily.events_today,
+        "vision_fps": m.fps.clone(),
+    }));
+}
+
+fn warn_metrics_error(msg: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prev = METRICS_ERR_LOG_SEC.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) >= 30 {
+        METRICS_ERR_LOG_SEC.store(now, Ordering::Relaxed);
+        // Sanitized: do not include SQL text or paths beyond the error Display.
+        warn!(error = %msg, "daily metrics query failed; skipping metrics emit");
     }
 }
 
@@ -986,7 +1034,6 @@ async fn process_detected_faces(
     zones: &ZoneMap,
     pool: &SqlitePool,
     tx: &broadcast::Sender<WsEvent>,
-    metrics: &Arc<RwLock<VisionMetrics>>,
 ) -> Vec<serde_json::Value> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1074,23 +1121,24 @@ async fn process_detected_faces(
         let zone = track_zone(tr.bbox, &zones.zones);
         let is_walkby = trajectory_is_walkby(tr, &zones.zones, settings.walkby_min_dwell_frames);
         // quality_ok on track already encodes may_vote
-        let mut state = hud_state(
+        let mut hud = hud_state(
             tr.quality_ok || tr.label == "LOW QUALITY",
             tr.employee_id,
             zone,
             is_walkby,
             smart,
             zones_empty,
-        )
-        .as_str()
-        .to_string();
+        );
         if !tr.quality_ok && tr.label == "LOW QUALITY" {
-            state = "low_quality".into();
+            hud = HudState::LowQuality;
         }
 
         let can_try_commit = tr.quality_ok
             && tr.employee_id.is_some()
             && preferred_id.map(|id| id == tr.track_id).unwrap_or(true);
+
+        let mut attempt = IdentityAttempt::NotAttempted;
+        let mut eligible = false;
 
         if can_try_commit {
             if let Some(commit) = evaluate_vote(
@@ -1099,7 +1147,7 @@ async fn process_detected_faces(
                 settings.vote_min_hits,
                 settings.match_threshold,
             ) {
-                let eligible = commit_eligible(
+                eligible = commit_eligible(
                     tr,
                     &zones.zones,
                     settings.enable_smart_scene,
@@ -1118,9 +1166,12 @@ async fn process_detected_faces(
                     )
                     .await
                     {
-                        Ok(Some((event_id, name, kind))) => {
-                            state = "committed".into();
-                            // mark last_commit_ts on live tracker
+                        Ok(CommitOutcome::Committed {
+                            event_id,
+                            name,
+                            kind,
+                        }) => {
+                            attempt = IdentityAttempt::Committed;
                             if let Some(t) = tracker
                                 .tracks
                                 .iter_mut()
@@ -1128,10 +1179,6 @@ async fn process_detected_faces(
                             {
                                 t.last_commit_ts = Some(ts);
                                 t.state = "committed".into();
-                            }
-                            {
-                                let mut m = metrics.write().unwrap();
-                                m.events_today += 1;
                             }
                             let ts = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -1148,16 +1195,25 @@ async fn process_detected_faces(
                                 "ts": ts,
                             }));
                         }
-                        Ok(None) => {
-                            state = "cooldown".into();
+                        Ok(CommitOutcome::Skipped(reason)) => {
+                            attempt = IdentityAttempt::Skipped(reason);
+                            if reason != SkipReason::Cooldown {
+                                // Sanitized operator breadcrumb — no PII beyond reason code.
+                                tracing::debug!(
+                                    reason = reason.as_str(),
+                                    camera_id,
+                                    "identity commit skipped"
+                                );
+                            }
                         }
                         Err(e) => warn!("commit failed: {e}"),
                     }
-                } else {
-                    state = "walkby".into();
                 }
             }
         }
+
+        hud = refine_hud_after_identity(hud, is_walkby, eligible, attempt);
+        let state = hud.as_str().to_string();
         out.push(json!({
             "track_id": tr.track_id,
             "bbox": [tr.bbox.0, tr.bbox.1, tr.bbox.2, tr.bbox.3],
@@ -2360,5 +2416,169 @@ mod enroll_tests {
         s.max_enroll_pixels = 20_000_000;
         s.max_enroll_file_bytes = 10;
         assert!(validate_enroll_image_bytes(&solid_png(32, 32, 100), &s).is_err());
+    }
+}
+
+#[cfg(test)]
+mod metrics_and_hud_tests {
+    use super::*;
+    use pksp_core::{refine_hud_after_identity, HudState, IdentityAttempt, SkipReason};
+    use pksp_db::{connect_pool, create_employee, daily_attendance_metrics, Settings};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings() -> (Settings, PathBuf, PathBuf) {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("pksp-vision-metrics-{id}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("test.db");
+        let mut s = Settings::from_env();
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        s.database_url = format!("sqlite:////{abs}?mode=rwc");
+        s.data_dir = data_dir.clone();
+        s.camera_upsert = true;
+        s.cam_out_rtsp = String::new();
+        s.app_timezone = "UTC".into();
+        (s, data_dir, db_path)
+    }
+
+    #[tokio::test]
+    async fn emit_persisted_metrics_from_sqlite() {
+        let (settings, data_dir, db_path) = temp_settings();
+        let pool = connect_pool(&settings).await.unwrap();
+        let day = pksp_db::local_date_str(chrono::Utc::now(), "UTC").unwrap();
+        let emp = create_employee(&pool, "M1", "Metrics", None).await.unwrap();
+        sqlx::query(
+            "INSERT INTO attendance_events(employee_id, camera_id, kind, score, ts, local_date)
+             VALUES(?,?,?,?,?,?)",
+        )
+        .bind(emp)
+        .bind("cam_in")
+        .bind("check_in")
+        .bind(0.9_f64)
+        .bind(format!("{day} 08:00:00"))
+        .bind(&day)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let metrics = Arc::new(RwLock::new(VisionMetrics::default()));
+        metrics
+            .write()
+            .unwrap()
+            .online
+            .insert("cam_in".into(), true);
+        metrics.write().unwrap().fps.insert("cam_in".into(), 5.0);
+        let (tx, mut rx) = broadcast::channel::<WsEvent>(8);
+
+        emit_persisted_metrics(&pool, &settings, &metrics, &tx).await;
+        let msg = rx.try_recv().expect("metrics message");
+        assert_eq!(msg["type"], "metrics");
+        assert_eq!(msg["present_count"], 1);
+        assert_eq!(msg["events_today"], 1);
+        assert_eq!(msg["cameras_online"], 1);
+        assert_eq!(msg["vision_fps"]["cam_in"], 5.0);
+
+        // Restart simulation: fresh metrics handle still reads persisted truth.
+        let metrics2 = Arc::new(RwLock::new(VisionMetrics::default()));
+        let (tx2, mut rx2) = broadcast::channel::<WsEvent>(8);
+        emit_persisted_metrics(&pool, &settings, &metrics2, &tx2).await;
+        let msg2 = rx2.try_recv().expect("metrics after reset");
+        assert_eq!(msg2["present_count"], 1);
+        assert_eq!(msg2["events_today"], 1);
+
+        // Same values from direct DB query (midnight/restart invariant).
+        let direct = daily_attendance_metrics(&pool, &day).await.unwrap();
+        assert_eq!(direct.present_count, 1);
+        assert_eq!(direct.events_today, 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn emit_skips_on_query_failure_never_zeros() {
+        let (mut settings, data_dir, db_path) = temp_settings();
+        // Valid connect first, then point pool at a closed/broken scenario via
+        // invalid timezone so emit fails before inventing zeros.
+        settings.app_timezone = "Not/A_Zone".into();
+        // Pool still needs a real DB for connect_pool; create with UTC then swap.
+        let mut ok = settings.clone();
+        ok.app_timezone = "UTC".into();
+        let pool = connect_pool(&ok).await.unwrap();
+
+        let metrics = Arc::new(RwLock::new(VisionMetrics::default()));
+        let (tx, mut rx) = broadcast::channel::<WsEvent>(8);
+        emit_persisted_metrics(&pool, &settings, &metrics, &tx).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "must not broadcast metrics on timezone/query failure"
+        );
+
+        // Recovery: valid timezone emits real zeros for empty day (truthful zero).
+        settings.app_timezone = "UTC".into();
+        emit_persisted_metrics(&pool, &settings, &metrics, &tx).await;
+        let msg = rx.try_recv().expect("recovered metrics");
+        assert_eq!(msg["type"], "metrics");
+        assert_eq!(msg["present_count"], 0);
+        assert_eq!(msg["events_today"], 0);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn hud_projection_branches() {
+        // Approach not eligible → keep approaching (not walkby/cooldown).
+        assert_eq!(
+            refine_hud_after_identity(
+                HudState::Approaching,
+                false,
+                false,
+                IdentityAttempt::NotAttempted
+            ),
+            HudState::Approaching
+        );
+        // Actual walk-by.
+        assert_eq!(
+            refine_hud_after_identity(
+                HudState::Tracking,
+                true,
+                false,
+                IdentityAttempt::NotAttempted
+            ),
+            HudState::Walkby
+        );
+        // Cooldown only for cooldown skip.
+        assert_eq!(
+            refine_hud_after_identity(
+                HudState::Ready,
+                false,
+                true,
+                IdentityAttempt::Skipped(SkipReason::Cooldown)
+            ),
+            HudState::Cooldown
+        );
+        // No transition keeps prior.
+        assert_eq!(
+            refine_hud_after_identity(
+                HudState::Ready,
+                false,
+                true,
+                IdentityAttempt::Skipped(SkipReason::NoTransition)
+            ),
+            HudState::Ready
+        );
+        // Commit only after persist.
+        assert_eq!(
+            refine_hud_after_identity(HudState::Ready, false, true, IdentityAttempt::Committed),
+            HudState::Committed
+        );
     }
 }

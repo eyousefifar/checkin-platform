@@ -5,7 +5,7 @@ use chrono::Utc;
 use pksp_core::on_identity_commit;
 use pksp_core::{
     aggregate_daily, csv_encode_field, daily_csv_headers, Direction, EmployeeRef, EventKind,
-    FsmDecision, PriorEvent, RawEvent,
+    FsmDecision, PriorEvent, RawEvent, SkipReason,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -766,6 +766,73 @@ pub async fn load_gallery_matrix(
     Ok((ids, names, vecs))
 }
 
+/// Typed outcome of a commit attempt — never discard skip reasons at the DB boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Committed {
+        event_id: i64,
+        name: String,
+        kind: String,
+    },
+    Skipped(SkipReason),
+}
+
+/// Persisted daily attendance truth for dashboard metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DailyAttendanceMetrics {
+    pub events_today: i64,
+    pub present_count: i64,
+}
+
+/// Count events and present employees for a configured local calendar date.
+///
+/// `events_today` is the count of persisted attendance events for `local_date`.
+/// `present_count` is the count of *active* employees whose latest event that
+/// date is `check_in`. Latest is ordered by `ts DESC, id DESC` so ties are
+/// deterministic.
+pub async fn daily_attendance_metrics(
+    pool: &SqlitePool,
+    local_date: &str,
+) -> Result<DailyAttendanceMetrics> {
+    let events_today: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM attendance_events WHERE local_date=?")
+            .bind(local_date)
+            .fetch_one(pool)
+            .await?;
+
+    // One row per active employee with their latest event that day (ts, then id).
+    let latest_rows = sqlx::query(
+        "SELECT ae.employee_id AS employee_id, ae.kind AS kind, ae.id AS id, ae.ts AS ts
+         FROM attendance_events ae
+         INNER JOIN employees e ON e.id = ae.employee_id AND e.is_active = 1
+         WHERE ae.local_date = ?
+           AND ae.kind IN ('check_in', 'check_out')
+         ORDER BY ae.employee_id ASC, ae.ts DESC, ae.id DESC",
+    )
+    .bind(local_date)
+    .fetch_all(pool)
+    .await?;
+
+    let mut present_count: i64 = 0;
+    let mut seen_employee: Option<i64> = None;
+    for row in latest_rows {
+        let eid: i64 = row.get("employee_id");
+        if seen_employee == Some(eid) {
+            continue; // not the latest for this employee
+        }
+        seen_employee = Some(eid);
+        let kind: String = row.get("kind");
+        if kind == "check_in" {
+            present_count += 1;
+        }
+    }
+
+    Ok(DailyAttendanceMetrics {
+        events_today,
+        present_count,
+    })
+}
+
 #[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 pub async fn commit_identity(
     pool: &SqlitePool,
@@ -776,20 +843,20 @@ pub async fn commit_identity(
     cooldown_seconds: f64,
     min_dwell_seconds: f64,
     app_timezone: &str,
-) -> Result<Option<(i64, String, String)>> {
+) -> Result<CommitOutcome> {
     let cam = get_camera(pool, camera_id).await?;
     let Some(cam) = cam else {
-        return Ok(None);
+        return Ok(CommitOutcome::Skipped(SkipReason::MissingCamera));
     };
     let emp = sqlx::query("SELECT full_name, is_active FROM employees WHERE id=?")
         .bind(employee_id)
         .fetch_optional(pool)
         .await?;
     let Some(emp) = emp else {
-        return Ok(None);
+        return Ok(CommitOutcome::Skipped(SkipReason::MissingEmployee));
     };
     if emp.get::<i64, _>("is_active") == 0 {
-        return Ok(None);
+        return Ok(CommitOutcome::Skipped(SkipReason::InactiveEmployee));
     }
     let name: String = emp.get("full_name");
     let now = Utc::now();
@@ -804,8 +871,11 @@ pub async fn commit_identity(
         cooldown_seconds,
         min_dwell_seconds,
     );
-    let FsmDecision::Commit { kind } = decision else {
-        return Ok(None);
+    let kind = match decision {
+        FsmDecision::Commit { kind } => kind,
+        FsmDecision::Skip { reason } => {
+            return Ok(CommitOutcome::Skipped(reason));
+        }
     };
     let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
     let res = sqlx::query(
@@ -821,11 +891,11 @@ pub async fn commit_identity(
     .bind(&local_date)
     .execute(pool)
     .await?;
-    Ok(Some((
-        res.last_insert_rowid(),
+    Ok(CommitOutcome::Committed {
+        event_id: res.last_insert_rowid(),
         name,
-        kind.as_str().to_string(),
-    )))
+        kind: kind.as_str().to_string(),
+    })
 }
 
 /// Local calendar date (`YYYY-MM-DD`) for `now` in the named IANA timezone.
@@ -1487,6 +1557,213 @@ mod timezone_tests {
         // JSON daily keeps UTC wire values.
         let rows = build_daily(&pool, day).await.unwrap();
         assert_eq!(rows[0]["first_in"], "2026-07-12T08:00:00Z");
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod metrics_and_commit_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings() -> (Settings, PathBuf, PathBuf) {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("pksp-db-metrics-{id}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("test.db");
+        let mut s = Settings::from_env();
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        s.database_url = format!("sqlite:////{abs}?mode=rwc");
+        s.data_dir = data_dir.clone();
+        s.camera_upsert = true;
+        s.cam_out_rtsp = String::new();
+        s.app_timezone = "UTC".into();
+        (s, data_dir, db_path)
+    }
+
+    async fn insert_event(
+        pool: &SqlitePool,
+        employee_id: i64,
+        kind: &str,
+        ts: &str,
+        local_date: &str,
+    ) -> i64 {
+        let res = sqlx::query(
+            "INSERT INTO attendance_events(employee_id, camera_id, kind, score, ts, local_date)
+             VALUES(?,?,?,?,?,?)",
+        )
+        .bind(employee_id)
+        .bind("cam_in")
+        .bind(kind)
+        .bind(0.9_f64)
+        .bind(ts)
+        .bind(local_date)
+        .execute(pool)
+        .await
+        .unwrap();
+        res.last_insert_rowid()
+    }
+
+    #[tokio::test]
+    async fn daily_metrics_state_matrix() {
+        let (settings, data_dir, db_path) = temp_settings();
+        let pool = connect_pool(&settings).await.unwrap();
+        let day = "2026-07-12";
+
+        // Empty day.
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.events_today, 0);
+        assert_eq!(m.present_count, 0);
+
+        let a = create_employee(&pool, "A", "Alice", None).await.unwrap();
+        let b = create_employee(&pool, "B", "Bob", None).await.unwrap();
+        let c = create_employee(&pool, "C", "Carol", None).await.unwrap();
+
+        // In only → present.
+        insert_event(&pool, a, "check_in", "2026-07-12 08:00:00", day).await;
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.events_today, 1);
+        assert_eq!(m.present_count, 1);
+
+        // In then out → not present.
+        insert_event(&pool, a, "check_out", "2026-07-12 17:00:00", day).await;
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.events_today, 2);
+        assert_eq!(m.present_count, 0);
+
+        // Out then in → present.
+        insert_event(&pool, b, "check_out", "2026-07-12 09:00:00", day).await;
+        insert_event(&pool, b, "check_in", "2026-07-12 10:00:00", day).await;
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.events_today, 4);
+        assert_eq!(m.present_count, 1); // only B
+
+        // Inactive employee with check_in must not count as present.
+        update_employee_fields(
+            &pool,
+            c,
+            EmployeePatch {
+                full_name: None,
+                department: None,
+                is_active: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        insert_event(&pool, c, "check_in", "2026-07-12 11:00:00", day).await;
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.events_today, 5); // inactive still has events
+        assert_eq!(m.present_count, 1); // still only B
+
+        // Same-timestamp events ordered by ID: higher id wins.
+        let d = create_employee(&pool, "D", "Dana", None).await.unwrap();
+        let id_in = insert_event(&pool, d, "check_in", "2026-07-12 12:00:00", day).await;
+        let id_out = insert_event(&pool, d, "check_out", "2026-07-12 12:00:00", day).await;
+        assert!(id_out > id_in);
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        // D's latest by id is check_out → not present; B still present.
+        assert_eq!(m.present_count, 1);
+        assert_eq!(m.events_today, 7);
+
+        // Reverse order for E: out then in at same ts → in has higher id → present.
+        let e = create_employee(&pool, "E", "Eve", None).await.unwrap();
+        insert_event(&pool, e, "check_out", "2026-07-12 13:00:00", day).await;
+        insert_event(&pool, e, "check_in", "2026-07-12 13:00:00", day).await;
+        let m = daily_attendance_metrics(&pool, day).await.unwrap();
+        assert_eq!(m.present_count, 2); // B + E
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn commit_outcome_matrix() {
+        let (settings, data_dir, db_path) = temp_settings();
+        let pool = connect_pool(&settings).await.unwrap();
+        let emp = create_employee(&pool, "X", "Xavier", None).await.unwrap();
+
+        // Committed check_in.
+        let out = commit_identity(&pool, emp, "cam_in", 0.9, Some(1), 90.0, 30.0, "UTC")
+            .await
+            .unwrap();
+        match out {
+            CommitOutcome::Committed {
+                event_id,
+                name,
+                kind,
+            } => {
+                assert!(event_id > 0);
+                assert_eq!(name, "Xavier");
+                assert_eq!(kind, "check_in");
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+
+        // Cooldown on same camera immediately after.
+        let out = commit_identity(&pool, emp, "cam_in", 0.9, Some(1), 90.0, 30.0, "UTC")
+            .await
+            .unwrap();
+        assert_eq!(out, CommitOutcome::Skipped(SkipReason::Cooldown));
+
+        // Missing camera.
+        let out = commit_identity(&pool, emp, "no_such_cam", 0.9, None, 0.0, 0.0, "UTC")
+            .await
+            .unwrap();
+        assert_eq!(out, CommitOutcome::Skipped(SkipReason::MissingCamera));
+
+        // Missing employee.
+        let out = commit_identity(&pool, 999_999, "cam_in", 0.9, None, 0.0, 0.0, "UTC")
+            .await
+            .unwrap();
+        assert_eq!(out, CommitOutcome::Skipped(SkipReason::MissingEmployee));
+
+        // Inactive employee.
+        let inactive = create_employee(&pool, "Z", "Zed", None).await.unwrap();
+        update_employee_fields(
+            &pool,
+            inactive,
+            EmployeePatch {
+                full_name: None,
+                department: None,
+                is_active: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let out = commit_identity(&pool, inactive, "cam_in", 0.9, None, 0.0, 0.0, "UTC")
+            .await
+            .unwrap();
+        assert_eq!(out, CommitOutcome::Skipped(SkipReason::InactiveEmployee));
+
+        // No transition: bidirectional + recent check_in without dwell.
+        // Seed a bidirectional camera.
+        sqlx::query(
+            "INSERT OR REPLACE INTO cameras(id, name, rtsp_url, webrtc_path, direction, enabled, sort_order)
+             VALUES('cam_bi','Bi','','bi','bidirectional',1,2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let bi = create_employee(&pool, "BI", "Bidi", None).await.unwrap();
+        // First commit succeeds as check_in.
+        let out = commit_identity(&pool, bi, "cam_bi", 0.9, None, 0.0, 30.0, "UTC")
+            .await
+            .unwrap();
+        assert!(matches!(out, CommitOutcome::Committed { .. }));
+        // Immediate second with cooldown 0 but min_dwell 30 → NoTransition.
+        let out = commit_identity(&pool, bi, "cam_bi", 0.9, None, 0.0, 30.0, "UTC")
+            .await
+            .unwrap();
+        assert_eq!(out, CommitOutcome::Skipped(SkipReason::NoTransition));
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(&data_dir);

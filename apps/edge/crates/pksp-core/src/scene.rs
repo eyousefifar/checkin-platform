@@ -236,6 +236,45 @@ pub fn hud_state(
     }
 }
 
+/// Pure result of an identity commit attempt for HUD refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityAttempt {
+    /// Vote not ready or commit not attempted this frame.
+    NotAttempted,
+    /// Persisted attendance event.
+    Committed,
+    /// Typed skip from DB/FSM boundary.
+    Skipped(crate::fsm::SkipReason),
+}
+
+/// Refine prior HUD after eligibility + optional commit attempt.
+///
+/// Rules (truthful mapping):
+/// - `walkby` only when `trajectory_is_walkby` is true and the track was not
+///   commit-eligible (or commit was not attempted because of that);
+/// - `cooldown` only for `SkipReason::Cooldown`;
+/// - `committed` only after a persisted event;
+/// - other skips (no transition, inactive, missing…) keep the prior HUD state.
+pub fn refine_hud_after_identity(
+    prior: HudState,
+    is_walkby: bool,
+    eligible: bool,
+    attempt: IdentityAttempt,
+) -> HudState {
+    match attempt {
+        IdentityAttempt::Committed => HudState::Committed,
+        IdentityAttempt::Skipped(crate::fsm::SkipReason::Cooldown) => HudState::Cooldown,
+        IdentityAttempt::Skipped(_) => prior,
+        IdentityAttempt::NotAttempted => {
+            if !eligible && is_walkby {
+                HudState::Walkby
+            } else {
+                prior
+            }
+        }
+    }
+}
+
 /// Default door layout for single cam (normalized).
 pub fn default_door_zones() -> ZoneMap {
     ZoneMap {
@@ -393,5 +432,110 @@ mod tests {
         let tracks = vec![small, large.clone(), outside];
         let best = prefer_commit_track(&tracks, &zones, true).unwrap();
         assert_eq!(best.track_id, 2);
+    }
+
+    #[test]
+    fn approach_keeps_approaching_when_not_eligible() {
+        let prior = HudState::Approaching;
+        // Approach track: not eligible, not walkby → keep approaching.
+        assert_eq!(
+            refine_hud_after_identity(prior, false, false, IdentityAttempt::NotAttempted),
+            HudState::Approaching
+        );
+    }
+
+    #[test]
+    fn only_trajectory_walkby_maps_to_walkby() {
+        let prior = HudState::Ready;
+        assert_eq!(
+            refine_hud_after_identity(prior, true, false, IdentityAttempt::NotAttempted),
+            HudState::Walkby
+        );
+        // Ineligible but not walkby must not become walkby.
+        assert_eq!(
+            refine_hud_after_identity(prior, false, false, IdentityAttempt::NotAttempted),
+            HudState::Ready
+        );
+    }
+
+    #[test]
+    fn only_cooldown_skip_maps_to_cooldown() {
+        let prior = HudState::Ready;
+        assert_eq!(
+            refine_hud_after_identity(
+                prior,
+                false,
+                true,
+                IdentityAttempt::Skipped(crate::fsm::SkipReason::Cooldown)
+            ),
+            HudState::Cooldown
+        );
+        assert_eq!(
+            refine_hud_after_identity(
+                prior,
+                false,
+                true,
+                IdentityAttempt::Skipped(crate::fsm::SkipReason::NoTransition)
+            ),
+            HudState::Ready
+        );
+        assert_eq!(
+            refine_hud_after_identity(
+                prior,
+                false,
+                true,
+                IdentityAttempt::Skipped(crate::fsm::SkipReason::InactiveEmployee)
+            ),
+            HudState::Ready
+        );
+        assert_eq!(
+            refine_hud_after_identity(
+                prior,
+                false,
+                true,
+                IdentityAttempt::Skipped(crate::fsm::SkipReason::MissingCamera)
+            ),
+            HudState::Ready
+        );
+    }
+
+    #[test]
+    fn committed_only_after_persist() {
+        assert_eq!(
+            refine_hud_after_identity(HudState::Ready, false, true, IdentityAttempt::Committed),
+            HudState::Committed
+        );
+    }
+
+    #[test]
+    fn eligibility_matrix_versus_hud() {
+        let zones = active_map().zones;
+        // Approach: not eligible, HUD approaching
+        let approach = base_track((0.16, 0.12, 0.25, 0.22), vec![(0.20, 0.15); 4]);
+        assert!(!commit_eligible(&approach, &zones, true, 3));
+        assert!(!trajectory_is_walkby(&approach, &zones, 3));
+        let zone = track_zone(approach.bbox, &zones);
+        let prior = hud_state(true, Some(1), zone, false, true, false);
+        assert_eq!(prior, HudState::Approaching);
+        assert_eq!(
+            refine_hud_after_identity(prior, false, false, IdentityAttempt::NotAttempted),
+            HudState::Approaching
+        );
+
+        // Active ready: eligible
+        let active = base_track(
+            (0.4, 0.4, 0.55, 0.7),
+            vec![(0.45, 0.5), (0.46, 0.51), (0.47, 0.52), (0.48, 0.53)],
+        );
+        assert!(commit_eligible(&active, &zones, true, 3));
+        let prior = hud_state(
+            true,
+            Some(1),
+            track_zone(active.bbox, &zones),
+            false,
+            true,
+            false,
+        );
+        assert_eq!(prior, HudState::Ready);
     }
 }
