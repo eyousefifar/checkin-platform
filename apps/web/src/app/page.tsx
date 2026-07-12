@@ -9,7 +9,8 @@ import { API_URL } from "@/lib/api";
 
 export default function DashboardPage() {
   const { connected, detections, events, metrics, cameraOnline } = useLiveWs();
-  const camInOnline = cameraOnline["cam_in"] ?? connected;
+  // Do not infer camera capture from WS transport connectivity.
+  const camInOnline = cameraOnline["cam_in"];
   const fps = metrics?.vision_fps?.cam_in;
 
   // Resolve webrtcPath from the server (public /health already exposes the
@@ -51,7 +52,10 @@ export default function DashboardPage() {
       </div>
 
       <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <MetricPill label="Cameras" value={metrics?.cameras_online ?? (camInOnline ? 1 : 0)} />
+        <MetricPill
+          label="Cameras"
+          value={metrics?.cameras_online ?? (camInOnline === true ? 1 : 0)}
+        />
         <MetricPill label="Present" value={metrics?.present_count ?? "—"} />
         <MetricPill label="Events today" value={metrics?.events_today ?? events.length} />
         <MetricPill label="Vision FPS" value={fps != null ? fps.toFixed(1) : "—"} />

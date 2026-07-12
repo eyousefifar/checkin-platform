@@ -31,3 +31,7 @@ image = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 subtle = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
+uuid = { workspace = true }

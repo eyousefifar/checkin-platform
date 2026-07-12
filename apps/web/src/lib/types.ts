@@ -36,6 +36,12 @@ export type MetricsMsg = {
   vision_fps: Record<string, number>;
 };
 
+export type CameraStatusMsg = {
+  type: "camera_status";
+  camera_id: string;
+  online: boolean;
+};
+
 export type Employee = {
   id: number;
   employee_code: string;

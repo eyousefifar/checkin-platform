@@ -17,7 +17,8 @@ export function CameraTile({
   cameraId: string;
   name: string;
   direction: string;
-  online: boolean;
+  /** Capture status from camera_status WS messages; undefined = unknown. */
+  online?: boolean;
   faces: FaceDet[];
   fps?: number;
   webrtcPath?: string;
@@ -142,7 +143,11 @@ export function CameraTile({
         <div className="absolute inset-0 z-[1] flex items-center justify-center bg-gradient-to-b from-[#0a0a0a] to-[#111]">
           <div className="text-center px-4">
             <div className="font-mono text-[10px] uppercase tracking-label text-muted">
-              {online ? "Vision online · awaiting WebRTC" : "Camera offline"}
+              {online === true
+                ? "Vision online · awaiting WebRTC"
+                : online === false
+                  ? "Camera offline"
+                  : "Camera status unknown"}
             </div>
             <div className="mt-1 text-xs text-body">
               {webrtcBase}/{path}
@@ -177,12 +182,21 @@ export function CameraTile({
       <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
         <span
           className={`px-2 py-1 text-[10px] font-bold uppercase tracking-label ${
-            online || videoOk
+            online === true || videoOk
               ? "bg-success/20 text-success"
-              : "bg-m-red/20 text-m-red"
+              : online === false
+                ? "bg-m-red/20 text-m-red"
+                : "bg-black/70 text-muted"
           }`}
+          data-camera-status={
+            online === true ? "online" : online === false ? "offline" : "unknown"
+          }
         >
-          {online || videoOk ? "ONLINE" : "OFFLINE"}
+          {online === true || videoOk
+            ? "ONLINE"
+            : online === false
+              ? "OFFLINE"
+              : "UNKNOWN"}
         </span>
         {fps != null && (
           <span className="bg-black/70 px-2 py-1 font-mono text-[10px] text-muted">

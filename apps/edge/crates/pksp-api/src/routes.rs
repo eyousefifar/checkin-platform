@@ -20,7 +20,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Rate-limit gallery reload error logs (monotonic seconds of last emit).
 static GALLERY_RELOAD_ERR_LOG_SEC: AtomicU64 = AtomicU64::new(0);
@@ -470,13 +470,23 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let _ = sender.send(Message::Text(hello.to_string().into())).await;
 
     let send_task = tokio::spawn(async move {
-        while let Ok(ev) = rx.recv().await {
-            if sender
-                .send(Message::Text(ev.to_string().into()))
-                .await
-                .is_err()
-            {
-                break;
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if sender
+                        .send(Message::Text(ev.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Advance past skipped messages; never leave an open silent socket.
+                    warn!(skipped, "ws live broadcast lagged; continuing from latest");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
