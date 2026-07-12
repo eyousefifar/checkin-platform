@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pksp-core",
+    "crates/pksp-db",
+    "crates/pksp-vision",
+    "crates/pksp-media",
+    "crates/pksp-api",
+    "crates/pksp-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+pksp-core = { path = "crates/pksp-core" }
+pksp-db = { path = "crates/pksp-db" }
+pksp-vision = { path = "crates/pksp-vision" }
+pksp-media = { path = "crates/pksp-media" }
+pksp-api = { path = "crates/pksp-api" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["multipart", "ws"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10"
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+futures-util = "0.3"
+image = { version = "0.25", default-features = true }
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+subtle = "2"
+base64 = "0.22"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio-tungstenite = "0.26"
+url = "2"

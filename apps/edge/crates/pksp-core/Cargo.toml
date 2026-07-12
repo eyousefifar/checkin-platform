@@ -1,0 +1,14 @@
+[package]
+name = "pksp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure PKSP algorithms — no I/O"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

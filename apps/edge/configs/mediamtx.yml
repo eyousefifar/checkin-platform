@@ -1,0 +1,32 @@
+# MediaMTX config owned by pksp edge (bundled binary under apps/edge/bin/mediamtx)
+logLevel: info
+api: yes
+apiAddress: :9997
+
+rtsp: yes
+rtspAddress: :8554
+rtmp: yes
+rtmpAddress: :1935
+hls: yes
+hlsAddress: :8888
+webrtc: yes
+webrtcAddress: :8889
+
+# Allow LAN WebRTC; override if needed
+# webrtcAdditionalHosts: [192.168.1.10]
+
+paths:
+  # Demo / publisher path (ffmpeg can push here)
+  demo:
+    source: publisher
+
+  # Optional direct camera pull — leave as publisher if feeding via RTMP transcoder
+  cam_in:
+    source: publisher
+
+  # Browser-safe H.264 path (ffmpeg publishes RTMP here when source is H.265)
+  cam_in_h264:
+    source: publisher
+
+  cam_out:
+    source: publisher

@@ -34,3 +34,14 @@ samples/*.mp4
 artifacts/
 dist/
 build/
+
+# Rust edge
+apps/edge/target/
+apps/edge/data/
+apps/edge/tmp-*/
+apps/edge/tmp-*
+apps/edge/*.log
+apps/edge/bin/ffmpeg
+apps/edge/bin/mediamtx
+apps/edge/bin/mediamtx.yml
+*.rlib

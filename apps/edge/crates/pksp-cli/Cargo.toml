@@ -1,0 +1,26 @@
+[package]
+name = "pksp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pksp"
+path = "src/main.rs"
+
+[features]
+default = []
+ort = ["pksp-api/ort", "pksp-vision/ort"]
+
+[dependencies]
+pksp-api = { workspace = true }
+pksp-db = { workspace = true }
+pksp-media = { workspace = true }
+pksp-vision = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }

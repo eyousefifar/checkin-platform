@@ -1,0 +1,846 @@
+//! SQLite access via sqlx + migrations.
+
+use anyhow::{Context, Result};
+use chrono::Utc;
+use pksp_core::{
+    aggregate_daily, daily_csv_headers, Direction, EventKind, FsmDecision, PriorEvent, RawEvent,
+    EmployeeRef,
+};
+use pksp_core::on_identity_commit;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use tracing::info;
+
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub database_url: String,
+    pub data_dir: PathBuf,
+    pub admin_password: String,
+    pub jwt_secret: String,
+    pub jwt_ttl_hours: i64,
+    pub cors_origins: Vec<String>,
+    pub app_timezone: String,
+    pub cam_in_rtsp: String,
+    pub cam_out_rtsp: String,
+    pub cam_in_webrtc_path: String,
+    pub cam_out_webrtc_path: String,
+    pub cam_in_direction: String,
+    pub cam_out_direction: String,
+    pub camera_upsert: bool,
+    pub mock_vision: bool,
+    pub vision_enabled: bool,
+    pub vision_target_fps: f64,
+    pub match_threshold: f32,
+    pub match_margin: f32,
+    pub min_face_px: i32,
+    pub min_det_score: f32,
+    pub iou_match_threshold: f32,
+    pub track_max_age_frames: i32,
+    pub vote_window: usize,
+    pub vote_min_hits: usize,
+    pub min_enroll_images: usize,
+    pub cooldown_seconds: f64,
+    pub min_dwell_seconds: f64,
+    pub embedding_dim: usize,
+    pub model_name: String,
+    pub enable_smart_scene: bool,
+    pub walkby_min_dwell_frames: usize,
+    /// Directory for zones.{camera_id}.json (empty → defaults only).
+    pub zone_config_dir: PathBuf,
+    /// Max approximate yaw degrees; 0 disables pose check.
+    pub pose_max_yaw: f32,
+    /// Min Laplacian variance; 0 disables blur check.
+    pub blur_min_var: f32,
+    pub det_size: i32,
+    pub onnx_providers: String,
+    pub require_real_vision: bool,
+    pub vision_adaptive: bool,
+    /// Preferred browser-safe H.264 RTSP (skips transcoder when set).
+    pub cam_in_h264_rtsp: String,
+    pub bind_addr: String,
+    /// Empty or "mediamtx" → auto-resolve apps/edge/bin/mediamtx then PATH
+    pub mediamtx_bin: String,
+    pub mediamtx_config: PathBuf,
+    /// Empty or "ffmpeg" → auto-resolve apps/edge/bin/ffmpeg then PATH
+    pub ffmpeg_bin: String,
+    pub webrtc_base: String,
+}
+
+impl Settings {
+    pub fn from_env() -> Self {
+        let data_dir = PathBuf::from(env_or("DATA_DIR", "data"));
+        // Prefer explicit DATABASE_URL; otherwise place DB under DATA_DIR.
+        // Python monorepo .env uses `sqlite:///./data/pksp.db` (relative) — resolve later.
+        let db_default = format!("sqlite://{}/pksp-rust.db?mode=rwc", data_dir.display());
+        let database_url = env_or("DATABASE_URL", &db_default);
+        Self {
+            database_url,
+            data_dir,
+            admin_password: env_or("ADMIN_PASSWORD", "change-me"),
+            jwt_secret: env_or("JWT_SECRET", "dev-jwt-secret-change-me"),
+            jwt_ttl_hours: env_or("JWT_TTL_HOURS", "12").parse().unwrap_or(12),
+            cors_origins: env_or("CORS_ORIGINS", "http://localhost:3000")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            app_timezone: env_or("APP_TIMEZONE", "UTC"),
+            cam_in_rtsp: env_or("CAM_IN_RTSP", "rtsp://127.0.0.1:8554/demo"),
+            cam_out_rtsp: env_or("CAM_OUT_RTSP", ""),
+            cam_in_webrtc_path: env_or("CAM_IN_WEBRTC_PATH", "demo"),
+            cam_out_webrtc_path: env_or("CAM_OUT_WEBRTC_PATH", "cam_out"),
+            cam_in_direction: env_or("CAM_IN_DIRECTION", "bidirectional"),
+            cam_out_direction: env_or("CAM_OUT_DIRECTION", "out"),
+            camera_upsert: env_or("CAMERA_UPSERT", "true") != "false",
+            mock_vision: env_or("MOCK_VISION", "true") != "false",
+            vision_enabled: env_or("VISION_ENABLED", "true") != "false",
+            vision_target_fps: env_or("VISION_TARGET_FPS", "5").parse().unwrap_or(5.0),
+            match_threshold: env_or("MATCH_THRESHOLD", "0.45").parse().unwrap_or(0.45),
+            match_margin: env_or("MATCH_MARGIN", "0.08").parse().unwrap_or(0.08),
+            min_face_px: env_or("MIN_FACE_PX", "60").parse().unwrap_or(60),
+            min_det_score: env_or("MIN_DET_SCORE", "0.5").parse().unwrap_or(0.5),
+            iou_match_threshold: env_or("IOU_MATCH_THRESHOLD", "0.3").parse().unwrap_or(0.3),
+            track_max_age_frames: env_or("TRACK_MAX_AGE_FRAMES", "10").parse().unwrap_or(10),
+            vote_window: env_or("VOTE_WINDOW", "5").parse().unwrap_or(5),
+            vote_min_hits: env_or("VOTE_MIN_HITS", "3").parse().unwrap_or(3),
+            min_enroll_images: env_or("MIN_ENROLL_IMAGES", "1").parse().unwrap_or(1),
+            cooldown_seconds: env_or("COOLDOWN_SECONDS", "90").parse().unwrap_or(90.0),
+            min_dwell_seconds: env_or("MIN_DWELL_SECONDS", "30").parse().unwrap_or(30.0),
+            embedding_dim: env_or("EMBEDDING_DIM", "512").parse().unwrap_or(512),
+            model_name: env_or("MODEL_NAME", "buffalo_l"),
+            enable_smart_scene: env_or("ENABLE_SMART_SCENE", "true") != "false",
+            walkby_min_dwell_frames: env_or("WALKBY_MIN_DWELL_FRAMES", "3")
+                .parse()
+                .unwrap_or(3),
+            zone_config_dir: {
+                if let Ok(v) = std::env::var("ZONE_CONFIG_DIR") {
+                    PathBuf::from(v)
+                } else {
+                    let edge = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../configs");
+                    if edge.is_dir() {
+                        edge
+                    } else {
+                        PathBuf::from("configs")
+                    }
+                }
+            },
+            pose_max_yaw: env_or("POSE_MAX_YAW", "0").parse().unwrap_or(0.0),
+            blur_min_var: env_or("BLUR_MIN_VAR", "0").parse().unwrap_or(0.0),
+            det_size: env_or("DET_SIZE", "640").parse().unwrap_or(640),
+            onnx_providers: env_or("ONNX_PROVIDERS", "CPUExecutionProvider"),
+            require_real_vision: env_or("REQUIRE_REAL_VISION", "false") == "true",
+            vision_adaptive: env_or("VISION_ADAPTIVE", "false") == "true",
+            cam_in_h264_rtsp: env_or("CAM_IN_H264_RTSP", ""),
+            bind_addr: env_or("BIND_ADDR", "0.0.0.0:8000"),
+            // Auto-resolve bundled apps/edge/bin/* unless overridden
+            mediamtx_bin: env_or("MEDIAMTX_BIN", "mediamtx"),
+            mediamtx_config: {
+                if let Ok(v) = std::env::var("MEDIAMTX_CONFIG") {
+                    PathBuf::from(v)
+                } else {
+                    let edge = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../configs/mediamtx.yml");
+                    if edge.is_file() {
+                        edge
+                    } else {
+                        PathBuf::from("configs/mediamtx.yml")
+                    }
+                }
+            },
+            ffmpeg_bin: env_or("FFMPEG_BIN", "ffmpeg"),
+            webrtc_base: env_or("WEBRTC_BASE", "http://localhost:8889"),
+        }
+    }
+
+    pub fn enroll_dir(&self) -> PathBuf {
+        self.data_dir.join("enroll")
+    }
+
+    pub fn model_dir(&self) -> PathBuf {
+        self.data_dir.join("models/buffalo_l")
+    }
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Resolve a SQLite file path from SQLAlchemy / sqlx-style URLs.
+///
+/// | Input | Path |
+/// |---|---|
+/// | `sqlite:///./data/pksp.db` | `./data/pksp.db` (relative) |
+/// | `sqlite:///data/pksp.db` | `data/pksp.db` (relative) |
+/// | `sqlite:////tmp/x.db` | `/tmp/x.db` (absolute) |
+/// | `data/foo.db` | `data/foo.db` (bare) |
+///
+/// **Bug fixed:** naive `strip_prefix("sqlite://")` turned
+/// `sqlite:///./data/pksp.db` into `/./data/pksp.db` → `create_dir_all("/data")` EROFS.
+pub fn resolve_sqlite_path(url: &str) -> PathBuf {
+    let base = url.split('?').next().unwrap_or(url).trim();
+    if base == ":memory:" || base.ends_with(":memory:") {
+        return PathBuf::from(":memory:");
+    }
+    if let Some(after_scheme) = base.strip_prefix("sqlite:") {
+        // Forms after "sqlite:":
+        //   ///./data/pksp.db  (3 slashes → relative)
+        //   ////tmp/x.db       (4 slashes → absolute)
+        //   //localhost/x      (rare)
+        if let Some(rest) = after_scheme.strip_prefix("//") {
+            // rest is "/./data/..." or "//tmp/..." or "host/..."
+            if let Some(abs) = rest.strip_prefix("//") {
+                // four-slash absolute: ////tmp/x → tmp was wrong; rest was //tmp/x
+                // after strip_prefix("//") on after_scheme: rest starts with /
+                // sqlite:////tmp/x → after_scheme = ////tmp/x → strip // → //tmp/x
+                return PathBuf::from(format!("/{abs}"));
+            }
+            if rest.starts_with('/') {
+                // three-slash: /./data/pksp.db or /data/pksp.db → drop one leading /
+                return PathBuf::from(&rest[1..]);
+            }
+            // sqlite://host/path — treat rest as path
+            return PathBuf::from(rest);
+        }
+        // sqlite:/path (unusual)
+        return PathBuf::from(after_scheme.trim_start_matches('/'));
+    }
+    PathBuf::from(base)
+}
+
+pub async fn connect_pool(settings: &Settings) -> Result<SqlitePool> {
+    std::fs::create_dir_all(&settings.data_dir).with_context(|| {
+        format!("create data_dir {}", settings.data_dir.display())
+    })?;
+    std::fs::create_dir_all(settings.enroll_dir()).with_context(|| {
+        format!("create enroll_dir {}", settings.enroll_dir().display())
+    })?;
+
+    let db_path = resolve_sqlite_path(&settings.database_url);
+    if db_path != Path::new(":memory:") {
+        if let Some(parent) = db_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "create sqlite parent dir {} (from DATABASE_URL={})",
+                        parent.display(),
+                        settings.database_url
+                    )
+                })?;
+            }
+        }
+    }
+
+    let opts = if db_path == Path::new(":memory:") {
+        SqliteConnectOptions::from_str("sqlite::memory:")?
+            .create_if_missing(true)
+            .foreign_keys(true)
+    } else {
+        SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .foreign_keys(true)
+    };
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(opts)
+        .await
+        .with_context(|| format!("connect sqlite at {}", db_path.display()))?;
+
+    // Run migrations from apps/edge/migrations relative to CARGO_MANIFEST_DIR of workspace
+    let migrator = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations"
+    )))
+    .await
+    .context("load migrations")?;
+    migrator.run(&pool).await.context("run migrations")?;
+
+    seed_or_upsert_cameras(&pool, settings).await?;
+    ensure_gallery_version(&pool).await?;
+    Ok(pool)
+}
+
+async fn ensure_gallery_version(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO app_meta(key, value) VALUES('gallery_version', '0')",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn seed_or_upsert_cameras(pool: &SqlitePool, settings: &Settings) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let _ = now;
+    upsert_camera(
+        pool,
+        "cam_in",
+        "Entrance",
+        &settings.cam_in_rtsp,
+        &settings.cam_in_webrtc_path,
+        &settings.cam_in_direction,
+        0,
+        settings.camera_upsert,
+    )
+    .await?;
+    if !settings.cam_out_rtsp.is_empty() {
+        upsert_camera(
+            pool,
+            "cam_out",
+            "Exit",
+            &settings.cam_out_rtsp,
+            &settings.cam_out_webrtc_path,
+            &settings.cam_out_direction,
+            1,
+            settings.camera_upsert,
+        )
+        .await?;
+    }
+    info!("cameras seeded/upserted");
+    Ok(())
+}
+
+async fn upsert_camera(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    rtsp: &str,
+    webrtc: &str,
+    direction: &str,
+    sort_order: i32,
+    do_upsert: bool,
+) -> Result<()> {
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM cameras WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    if exists.is_none() {
+        sqlx::query(
+            "INSERT INTO cameras(id, name, rtsp_url, webrtc_path, direction, enabled, sort_order)
+             VALUES(?,?,?,?,?,1,?)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(rtsp)
+        .bind(webrtc)
+        .bind(direction)
+        .bind(sort_order)
+        .execute(pool)
+        .await?;
+    } else if do_upsert {
+        sqlx::query(
+            "UPDATE cameras SET name=?, rtsp_url=?, webrtc_path=?, direction=?, sort_order=? WHERE id=?",
+        )
+        .bind(name)
+        .bind(rtsp)
+        .bind(webrtc)
+        .bind(direction)
+        .bind(sort_order)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn gallery_version(pool: &SqlitePool) -> Result<u64> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM app_meta WHERE key = 'gallery_version'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(row
+        .and_then(|(v,)| v.parse().ok())
+        .unwrap_or(0))
+}
+
+pub async fn bump_gallery_version(pool: &SqlitePool) -> Result<u64> {
+    let v = gallery_version(pool).await? + 1;
+    sqlx::query(
+        "INSERT INTO app_meta(key, value) VALUES('gallery_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(v.to_string())
+    .execute(pool)
+    .await?;
+    Ok(v)
+}
+
+#[derive(Debug, Clone)]
+pub struct CameraRow {
+    pub id: String,
+    pub name: String,
+    pub rtsp_url: String,
+    pub webrtc_path: String,
+    pub direction: String,
+    pub enabled: bool,
+    pub sort_order: i32,
+}
+
+pub async fn list_cameras(pool: &SqlitePool, enabled_only: bool) -> Result<Vec<CameraRow>> {
+    let rows = if enabled_only {
+        sqlx::query(
+            "SELECT id, name, rtsp_url, webrtc_path, direction, enabled, sort_order FROM cameras WHERE enabled=1 ORDER BY sort_order",
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, name, rtsp_url, webrtc_path, direction, enabled, sort_order FROM cameras ORDER BY sort_order",
+        )
+        .fetch_all(pool)
+        .await?
+    };
+    Ok(rows
+        .into_iter()
+        .map(|r| CameraRow {
+            id: r.get("id"),
+            name: r.get("name"),
+            rtsp_url: r.get("rtsp_url"),
+            webrtc_path: r.get("webrtc_path"),
+            direction: r.get("direction"),
+            enabled: r.get::<i64, _>("enabled") != 0,
+            sort_order: r.get("sort_order"),
+        })
+        .collect())
+}
+
+pub async fn get_camera(pool: &SqlitePool, id: &str) -> Result<Option<CameraRow>> {
+    let r = sqlx::query(
+        "SELECT id, name, rtsp_url, webrtc_path, direction, enabled, sort_order FROM cameras WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r.map(|r| CameraRow {
+        id: r.get("id"),
+        name: r.get("name"),
+        rtsp_url: r.get("rtsp_url"),
+        webrtc_path: r.get("webrtc_path"),
+        direction: r.get("direction"),
+        enabled: r.get::<i64, _>("enabled") != 0,
+        sort_order: r.get("sort_order"),
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct EmployeeRow {
+    pub id: i64,
+    pub employee_code: String,
+    pub full_name: String,
+    pub department: Option<String>,
+    pub is_active: bool,
+}
+
+pub async fn list_employees(pool: &SqlitePool, q: Option<&str>) -> Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query(
+        "SELECT id, employee_code, full_name, department, is_active FROM employees ORDER BY full_name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::new();
+    for r in rows {
+        let id: i64 = r.get("id");
+        let code: String = r.get("employee_code");
+        let name: String = r.get("full_name");
+        if let Some(qq) = q {
+            let ql = qq.to_lowercase();
+            if !name.to_lowercase().contains(&ql) && !code.to_lowercase().contains(&ql) {
+                continue;
+            }
+        }
+        out.push(employee_dict(pool, id).await?);
+    }
+    Ok(out)
+}
+
+pub async fn employee_dict(pool: &SqlitePool, id: i64) -> Result<serde_json::Value> {
+    let r = sqlx::query(
+        "SELECT id, employee_code, full_name, department, is_active FROM employees WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .context("employee not found")?;
+    let images = sqlx::query(
+        "SELECT id, file_path, usable, reject_reason FROM employee_images WHERE employee_id=?",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    let emb = sqlx::query(
+        "SELECT num_images_used FROM employee_embeddings WHERE employee_id=?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    let usable = images
+        .iter()
+        .filter(|i| i.get::<i64, _>("usable") != 0)
+        .count();
+    let imgs: Vec<serde_json::Value> = images
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "id": i.get::<i64,_>("id"),
+                "file_path": i.get::<String,_>("file_path"),
+                "usable": i.get::<i64,_>("usable") != 0,
+                "reject_reason": i.get::<Option<String>,_>("reject_reason"),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "id": r.get::<i64,_>("id"),
+        "employee_code": r.get::<String,_>("employee_code"),
+        "full_name": r.get::<String,_>("full_name"),
+        "department": r.get::<Option<String>,_>("department"),
+        "is_active": r.get::<i64,_>("is_active") != 0,
+        "image_count": imgs.len(),
+        "usable_images": usable,
+        "embedding_ready": emb.is_some(),
+        "num_images_used": emb.as_ref().map(|e| e.get::<i64,_>("num_images_used")).unwrap_or(0),
+        "images": imgs,
+    }))
+}
+
+pub async fn create_employee(
+    pool: &SqlitePool,
+    code: &str,
+    full_name: &str,
+    department: Option<&str>,
+) -> Result<i64> {
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let res = sqlx::query(
+        "INSERT INTO employees(employee_code, full_name, department, is_active, created_at, updated_at)
+         VALUES(?,?,?,1,?,?)",
+    )
+    .bind(code)
+    .bind(full_name)
+    .bind(department)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(res.last_insert_rowid())
+}
+
+pub async fn load_gallery_matrix(
+    pool: &SqlitePool,
+    dim: usize,
+) -> Result<(Vec<i64>, Vec<String>, Vec<Vec<f32>>)> {
+    let rows = sqlx::query(
+        "SELECT e.id, e.full_name, emb.vector, emb.dim FROM employees e
+         JOIN employee_embeddings emb ON emb.employee_id = e.id
+         WHERE e.is_active = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut ids = Vec::new();
+    let mut names = Vec::new();
+    let mut vecs = Vec::new();
+    for r in rows {
+        let blob: Vec<u8> = r.get("vector");
+        let d: i64 = r.get("dim");
+        match pksp_core::unpack_embedding(&blob, d as usize) {
+            Ok(v) if v.len() == dim => {
+                ids.push(r.get("id"));
+                names.push(r.get("full_name"));
+                vecs.push(v);
+            }
+            _ => continue,
+        }
+    }
+    Ok((ids, names, vecs))
+}
+
+pub async fn commit_identity(
+    pool: &SqlitePool,
+    employee_id: i64,
+    camera_id: &str,
+    score: f32,
+    track_id: Option<i64>,
+    cooldown_seconds: f64,
+    min_dwell_seconds: f64,
+    app_timezone: &str,
+) -> Result<Option<(i64, String, String)>> {
+    let cam = get_camera(pool, camera_id).await?;
+    let Some(cam) = cam else {
+        return Ok(None);
+    };
+    let emp = sqlx::query("SELECT full_name, is_active FROM employees WHERE id=?")
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(emp) = emp else {
+        return Ok(None);
+    };
+    if emp.get::<i64, _>("is_active") == 0 {
+        return Ok(None);
+    }
+    let name: String = emp.get("full_name");
+    let now = Utc::now();
+    let local_date = local_date_str(now, app_timezone);
+    let last_today = last_event_today(pool, employee_id, &local_date).await?;
+    let last_cam = last_camera_event_ts(pool, employee_id, camera_id).await?;
+    let decision = on_identity_commit(
+        Direction::parse(&cam.direction),
+        now,
+        last_today.as_ref(),
+        last_cam,
+        cooldown_seconds,
+        min_dwell_seconds,
+    );
+    let FsmDecision::Commit { kind } = decision else {
+        return Ok(None);
+    };
+    let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let res = sqlx::query(
+        "INSERT INTO attendance_events(employee_id, camera_id, kind, score, track_id, needs_review, ts, local_date)
+         VALUES(?,?,?,?,?,0,?,?)",
+    )
+    .bind(employee_id)
+    .bind(camera_id)
+    .bind(kind.as_str())
+    .bind(score)
+    .bind(track_id)
+    .bind(&ts)
+    .bind(&local_date)
+    .execute(pool)
+    .await?;
+    Ok(Some((
+        res.last_insert_rowid(),
+        name,
+        kind.as_str().to_string(),
+    )))
+}
+
+fn local_date_str(now: chrono::DateTime<Utc>, tz_name: &str) -> String {
+    if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+        return now.with_timezone(&tz).date_naive().to_string();
+    }
+    now.date_naive().to_string()
+}
+
+async fn last_event_today(
+    pool: &SqlitePool,
+    employee_id: i64,
+    local_date: &str,
+) -> Result<Option<PriorEvent>> {
+    let r = sqlx::query(
+        "SELECT kind, ts, camera_id FROM attendance_events
+         WHERE employee_id=? AND local_date=? AND kind IN ('check_in','check_out')
+         ORDER BY ts DESC LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(local_date)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r.and_then(|row| {
+        let kind = EventKind::parse(&row.get::<String, _>("kind"))?;
+        let ts_s: String = row.get("ts");
+        let ts = chrono::NaiveDateTime::parse_from_str(&ts_s, "%Y-%m-%d %H:%M:%S")
+            .ok()
+            .map(|n| n.and_utc())?;
+        Some(PriorEvent {
+            kind,
+            ts,
+            camera_id: row.get("camera_id"),
+        })
+    }))
+}
+
+async fn last_camera_event_ts(
+    pool: &SqlitePool,
+    employee_id: i64,
+    camera_id: &str,
+) -> Result<Option<chrono::DateTime<Utc>>> {
+    let r = sqlx::query(
+        "SELECT ts FROM attendance_events
+         WHERE employee_id=? AND camera_id=? AND kind IN ('check_in','check_out')
+         ORDER BY ts DESC LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(camera_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r.and_then(|row| {
+        let ts_s: String = row.get("ts");
+        chrono::NaiveDateTime::parse_from_str(&ts_s, "%Y-%m-%d %H:%M:%S")
+            .ok()
+            .map(|n| n.and_utc())
+    }))
+}
+
+pub async fn build_daily(pool: &SqlitePool, day: &str) -> Result<Vec<serde_json::Value>> {
+    let emps = sqlx::query(
+        "SELECT id, employee_code, full_name, department FROM employees WHERE is_active=1",
+    )
+    .fetch_all(pool)
+    .await?;
+    let employees: Vec<EmployeeRef> = emps
+        .iter()
+        .map(|r| EmployeeRef {
+            id: r.get("id"),
+            employee_code: r.get("employee_code"),
+            full_name: r.get("full_name"),
+            department: r.get("department"),
+        })
+        .collect();
+    let evs = sqlx::query(
+        "SELECT employee_id, kind, ts FROM attendance_events WHERE local_date=?",
+    )
+    .bind(day)
+    .fetch_all(pool)
+    .await?;
+    let raw: Vec<RawEvent> = evs
+        .iter()
+        .filter_map(|r| {
+            let eid: Option<i64> = r.get("employee_id");
+            let eid = eid?;
+            let ts_s: String = r.get("ts");
+            let ts = chrono::NaiveDateTime::parse_from_str(&ts_s, "%Y-%m-%d %H:%M:%S").ok()?;
+            Some(RawEvent {
+                employee_id: eid,
+                kind: r.get("kind"),
+                ts,
+            })
+        })
+        .collect();
+    let rows = aggregate_daily(&employees, &raw);
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "employee_id": r.employee_id,
+                "employee_code": r.employee_code,
+                "full_name": r.full_name,
+                "department": r.department,
+                "first_in": r.first_in.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                "last_out": r.last_out.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                "duration_minutes": r.duration_minutes,
+                "status": r.status,
+                "check_in_count": r.check_in_count,
+                "check_out_count": r.check_out_count,
+            })
+        })
+        .collect())
+}
+
+pub async fn daily_csv(pool: &SqlitePool, day: &str) -> Result<String> {
+    let rows = build_daily(pool, day).await?;
+    let mut out = String::new();
+    out.push_str(&daily_csv_headers().join(","));
+    out.push('\n');
+    for r in rows {
+        let line = format!(
+            "{},{},{},{},{},{},{},{},{},{}\n",
+            day,
+            r["employee_code"].as_str().unwrap_or(""),
+            r["full_name"].as_str().unwrap_or(""),
+            r["department"].as_str().unwrap_or(""),
+            r["first_in"].as_str().unwrap_or(""),
+            r["last_out"].as_str().unwrap_or(""),
+            r["duration_minutes"]
+                .as_i64()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            r["status"].as_str().unwrap_or(""),
+            r["check_in_count"].as_i64().unwrap_or(0),
+            r["check_out_count"].as_i64().unwrap_or(0),
+        );
+        out.push_str(&line);
+    }
+    Ok(out)
+}
+
+pub async fn save_embedding(
+    pool: &SqlitePool,
+    employee_id: i64,
+    vector: &[u8],
+    dim: usize,
+    num_used: i32,
+    model_name: &str,
+) -> Result<()> {
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    sqlx::query(
+        "INSERT INTO employee_embeddings(employee_id, dim, vector, num_images_used, model_name, updated_at)
+         VALUES(?,?,?,?,?,?)
+         ON CONFLICT(employee_id) DO UPDATE SET
+           dim=excluded.dim, vector=excluded.vector, num_images_used=excluded.num_images_used,
+           model_name=excluded.model_name, updated_at=excluded.updated_at",
+    )
+    .bind(employee_id)
+    .bind(dim as i64)
+    .bind(vector)
+    .bind(num_used)
+    .bind(model_name)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn add_employee_image(
+    pool: &SqlitePool,
+    employee_id: i64,
+    file_path: &str,
+    usable: bool,
+    reject_reason: Option<&str>,
+) -> Result<i64> {
+    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let res = sqlx::query(
+        "INSERT INTO employee_images(employee_id, file_path, usable, reject_reason, created_at)
+         VALUES(?,?,?,?,?)",
+    )
+    .bind(employee_id)
+    .bind(file_path)
+    .bind(if usable { 1 } else { 0 })
+    .bind(reject_reason)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(res.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::resolve_sqlite_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn python_relative_dot_slash() {
+        let p = resolve_sqlite_path("sqlite:///./data/pksp.db");
+        assert_eq!(p, PathBuf::from("./data/pksp.db"));
+        // Must NOT be absolute root path that triggers EROFS
+        assert!(!p.is_absolute() || p.starts_with("."));
+        assert!(!p.starts_with("/data"));
+    }
+
+    #[test]
+    fn python_relative_plain() {
+        let p = resolve_sqlite_path("sqlite:///data/pksp.db");
+        assert_eq!(p, PathBuf::from("data/pksp.db"));
+    }
+
+    #[test]
+    fn absolute_four_slash() {
+        let p = resolve_sqlite_path("sqlite:////tmp/pksp.db");
+        assert_eq!(p, PathBuf::from("/tmp/pksp.db"));
+        assert!(p.is_absolute());
+    }
+
+    #[test]
+    fn with_query_mode() {
+        let p = resolve_sqlite_path("sqlite:///./data/pksp.db?mode=rwc");
+        assert_eq!(p, PathBuf::from("./data/pksp.db"));
+    }
+
+    #[test]
+    fn bare_path() {
+        let p = resolve_sqlite_path("data/rust-edge/pksp.db");
+        assert_eq!(p, PathBuf::from("data/rust-edge/pksp.db"));
+    }
+}

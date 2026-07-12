@@ -2,6 +2,8 @@
 
 On-prem employee check-in using RTSP cameras and face recognition.
 
+**Primary edge runtime:** Rust (`apps/edge` → `pksp serve`). Python API remains for rollback.
+
 > **Research / CEO demo MVP** — not a production payroll system.  
 > Face models (`buffalo_l`) may be **non-commercial** unless separately licensed.
 
