@@ -1,0 +1,29 @@
+# MediaMTX — RTSP in, WebRTC/HLS out for browser + vision
+# Docs: https://github.com/bluenviron/mediamtx
+
+logLevel: info
+api: yes
+apiAddress: :9997
+
+rtsp: yes
+rtspAddress: :8554
+rtmp: yes
+rtmpAddress: :1935
+hls: yes
+hlsAddress: :8888
+webrtc: yes
+webrtcAddress: :8889
+# Host candidates for LAN WebRTC (override if needed)
+# webrtcAdditionalHosts: [192.168.1.10]
+
+paths:
+  # Demo path: publish with scripts/demo_rtsp.sh (ffmpeg)
+  demo:
+    source: publisher
+
+  cam_in:
+    # Point at real camera or leave as publisher / use demo
+    source: publisher
+
+  cam_out:
+    source: publisher

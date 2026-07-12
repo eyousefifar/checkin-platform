@@ -1,0 +1,36 @@
+# deps
+node_modules/
+apps/web/node_modules/
+apps/web/.next/
+apps/api/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# runtime data / biometrics
+data/*
+!data/.gitkeep
+*.db
+
+# env / secrets
+.env
+.env.local
+apps/web/.env.local
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# models / samples
+models/
+samples/*.mp4
+!samples/.gitkeep
+
+# artifacts
+artifacts/
+dist/
+build/

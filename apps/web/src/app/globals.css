@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --canvas: #000000;
+  --surface-card: #1a1a1a;
+  --surface-elevated: #262626;
+  --ink: #ffffff;
+  --body: #bbbbbb;
+  --muted: #7e7e7e;
+  --hairline: #3c3c3c;
+  --m-blue-light: #0066b1;
+  --m-blue-dark: #1c69d4;
+  --m-red: #e22718;
+  --success: #0fa336;
+  --warning: #f4b400;
+}
+
+html,
+body {
+  background: var(--canvas);
+  color: var(--body-strong, #e6e6e6);
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
+}
+
+/* Subtle dashboard vignette */
+.dashboard-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.m-stripe {
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    #0066b1 0%,
+    #0066b1 33%,
+    #1c69d4 33%,
+    #1c69d4 66%,
+    #e22718 66%,
+    #e22718 100%
+  );
+}
+
+.scanline::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.04) 2px,
+    rgba(0, 0, 0, 0.04) 4px
+  );
+  opacity: 0.5;
+}
+
+/* Corner brackets for camera tiles */
+.hud-brackets::before,
+.hud-brackets::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: rgba(255, 255, 255, 0.55);
+  border-style: solid;
+  pointer-events: none;
+  z-index: 20;
+}
+.hud-brackets::before {
+  top: 8px;
+  left: 8px;
+  border-width: 1px 0 0 1px;
+}
+.hud-brackets::after {
+  top: 8px;
+  right: 8px;
+  border-width: 1px 1px 0 0;
+}
+.hud-brackets .bracket-bl,
+.hud-brackets .bracket-br {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: rgba(255, 255, 255, 0.55);
+  border-style: solid;
+  pointer-events: none;
+  z-index: 20;
+  bottom: 8px;
+}
+.hud-brackets .bracket-bl {
+  left: 8px;
+  border-width: 0 0 1px 1px;
+}
+.hud-brackets .bracket-br {
+  right: 8px;
+  border-width: 0 1px 1px 0;
+}
