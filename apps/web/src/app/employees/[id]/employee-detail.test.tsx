@@ -1,5 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/** Toggle a controlled checkbox via native click (fireEvent.change is unreliable). */
+async function setChecked(testId: string, checked: boolean) {
+  const el = screen.getByTestId(testId) as HTMLInputElement;
+  if (el.checked === checked) return;
+  await act(async () => {
+    el.click();
+  });
+  expect(el.checked).toBe(checked);
+}
 
 const apiMock = vi.hoisted(() => vi.fn());
 const confirmMock = vi.hoisted(() => vi.fn());
@@ -131,10 +141,7 @@ describe("EmployeeDetailPage edit and deactivate", () => {
     render(<EmployeeDetailPage />);
     await waitFor(() => expect(screen.getByTestId("edit-is-active")).toBeTruthy());
 
-    fireEvent.click(screen.getByTestId("edit-is-active")); // uncheck
-    expect((screen.getByTestId("edit-is-active") as HTMLInputElement).checked).toBe(
-      false,
-    );
+    await setChecked("edit-is-active", false);
     fireEvent.click(screen.getByTestId("save-profile"));
 
     await waitFor(() => {
@@ -160,7 +167,7 @@ describe("EmployeeDetailPage edit and deactivate", () => {
 
     render(<EmployeeDetailPage />);
     await waitFor(() => expect(screen.getByTestId("edit-is-active")).toBeTruthy());
-    fireEvent.click(screen.getByTestId("edit-is-active"));
+    await setChecked("edit-is-active", false);
     fireEvent.click(screen.getByTestId("save-profile"));
 
     await waitFor(() =>
@@ -190,7 +197,7 @@ describe("EmployeeDetailPage edit and deactivate", () => {
     expect((screen.getByTestId("edit-is-active") as HTMLInputElement).checked).toBe(
       false,
     );
-    fireEvent.click(screen.getByTestId("edit-is-active"));
+    await setChecked("edit-is-active", true);
     fireEvent.click(screen.getByTestId("save-profile"));
 
     await waitFor(() =>

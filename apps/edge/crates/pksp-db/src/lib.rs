@@ -354,16 +354,19 @@ pub async fn connect_pool(settings: &Settings) -> Result<SqlitePool> {
         SqliteConnectOptions::from_str("sqlite::memory:")?
             .create_if_missing(true)
             .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(5))
     } else {
         SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(5))
     };
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(10))
         .connect_with(opts)
         .await
         .with_context(|| format!("connect sqlite at {}", db_path.display()))?;
