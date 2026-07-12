@@ -28,7 +28,7 @@ open a pull request unless the operator explicitly asks.
 | 013 | Make browser video state truthful and retryable | P1 | M | 001, 007, 008, 011 | DONE |
 | 014 | Restore responsive and accessible operational UI | P2 | M | 001, 012, 013, 015, 016, 017, 018 | TODO |
 | 015 | Remove low-cost frontend and employee-list hot spots | P2 | S | 001 | DONE |
-| 016 | Render the one-or-two-camera wall from health | P2 | M | 007, 008, 013 | TODO |
+| 016 | Render the one-or-two-camera wall from health | P2 | M | 007, 008, 013 | DONE |
 | 017 | Add attendance explainability before analytics | P2 | M | 009, 011, 016 | TODO |
 | 018 | Add employee editing and reversible deactivation | P2 | S | 010, 012 | TODO |
 | 019 | Upgrade MediaMTX behind the stream regression gate | P2 | M | 007, 013 | TODO |

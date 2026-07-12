@@ -184,10 +184,9 @@ describe("DashboardPage live state", () => {
 
     const { rerender } = render(<DashboardPage />);
     expect(screen.getByTestId("health-retrying").textContent).toMatch(/retrying/i);
-    // No assumed WHEP path while health is unavailable.
-    expect(screen.getByTestId("camera-tile").getAttribute("data-webrtc-path")).toBe(
-      "",
-    );
+    // No camera tile / assumed WHEP path while health is unavailable.
+    expect(screen.queryByTestId("camera-tile")).toBeNull();
+    expect(screen.getByTestId("health-camera-state")).toBeTruthy();
 
     // Simulate useHealth recovery with a non-default path.
     await act(async () => {
