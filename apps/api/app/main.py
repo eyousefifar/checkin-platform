@@ -34,10 +34,12 @@ async def lifespan(app: FastAPI):
     hub.bind_loop(asyncio.get_running_loop())
 
     engine = get_face_engine()
+    provider = getattr(engine, "execution_provider", None) or ("mock" if settings.mock_vision else "unknown")
     logger.info(
-        "Face engine ready=%s model=%s mock_vision=%s",
+        "Face engine ready=%s model=%s provider=%s mock_vision=%s",
         getattr(engine, "ready", False),
         getattr(engine, "model_name", "?"),
+        provider,
         settings.mock_vision,
     )
     if db_session.SessionLocal is None:

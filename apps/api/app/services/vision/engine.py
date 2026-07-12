@@ -22,6 +22,9 @@ class FaceEngine(Protocol):
 
     def get(self, image_bgr: np.ndarray) -> list[DetectedFace]: ...
 
+    # Optional on optimized engines for reporting (health, logs)
+    execution_provider: str | None = None
+
 
 class MockFaceEngine:
     """Deterministic engine for tests and Phase A theater enroll path."""
@@ -30,6 +33,7 @@ class MockFaceEngine:
         self.ready = True
         self.model_name = "mock"
         self.dim = dim
+        self.execution_provider = "mock"
         # seed-based synthetic embeddings keyed by mean pixel intensity bucket
         self._cache: dict[int, np.ndarray] = {}
 
@@ -70,25 +74,62 @@ class MockFaceEngine:
 
 
 class InsightFaceEngine:
-    def __init__(self, model_name: str = "buffalo_l", det_size: int = 640):
+    def __init__(self, model_name: str = "buffalo_l", det_size: int = 640, providers: list[str] | None = None):
         self.model_name = model_name
         self.det_size = det_size
         self.ready = False
         self._app = None
+        self.execution_provider: str | None = None
+        self._providers_used: list[str] = []
+
         try:
             from insightface.app import FaceAnalysis
+            import os
+            import onnxruntime as ort
+
+            # Apply thread tuning via env (affects internal sessions; effective before FaceAnalysis)
+            # 0 means leave default (runtime / oneDNN decide)
+            intra = 0
+            inter = 0
+            try:
+                from app.config import get_settings
+                s = get_settings()
+                intra = getattr(s, "onnx_intra_op_num_threads", 0) or 0
+                inter = getattr(s, "onnx_inter_op_num_threads", 0) or 0
+            except Exception:
+                pass
+
+            if intra > 0:
+                os.environ.setdefault("OMP_NUM_THREADS", str(intra))
+                os.environ.setdefault("ONNXRUNTIME_INTRA_OP_NUM_THREADS", str(intra))
+            if inter > 0:
+                os.environ.setdefault("ONNXRUNTIME_INTER_OP_NUM_THREADS", str(inter))
+
+            requested = providers or ["CPUExecutionProvider"]
+            try:
+                available = set(ort.get_available_providers())
+            except Exception:
+                available = {"CPUExecutionProvider"}
+
+            # Keep only available; always ensure a CPU fallback
+            selected = [p for p in requested if p in available]
+            if not selected:
+                selected = ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else list(available)[:1] or ["CPUExecutionProvider"]
 
             app = FaceAnalysis(
                 name=model_name,
-                providers=["CPUExecutionProvider"],
+                providers=selected,
                 allowed_modules=["detection", "recognition"],
             )
             app.prepare(ctx_id=-1, det_size=(det_size, det_size))
             self._app = app
             self.ready = True
+            self._providers_used = selected
+            self.execution_provider = selected[0] if selected else "CPUExecutionProvider"
         except Exception as exc:  # noqa: BLE001 — surface as not ready
             self._error = str(exc)
             self.ready = False
+            self.execution_provider = None
 
     def get(self, image_bgr: np.ndarray) -> list[DetectedFace]:
         if not self.ready or self._app is None:
@@ -124,7 +165,11 @@ def get_face_engine() -> FaceEngine:
     if s.mock_vision:
         _engine = MockFaceEngine(dim=s.embedding_dim)
     else:
-        eng = InsightFaceEngine(model_name=s.insightface_model, det_size=s.det_size)
+        eng = InsightFaceEngine(
+            model_name=s.insightface_model,
+            det_size=s.det_size,
+            providers=s.onnx_providers_list,
+        )
         if not eng.ready:
             # fall back to mock so API stays usable; health reflects vision_ready
             _engine = MockFaceEngine(dim=s.embedding_dim)

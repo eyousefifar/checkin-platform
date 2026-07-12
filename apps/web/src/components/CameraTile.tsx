@@ -27,9 +27,14 @@ export function CameraTile({
   const [size, setSize] = useState({ w: 640, h: 360 });
   const [videoOk, setVideoOk] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
+  const [useHlsFallback, setUseHlsFallback] = useState(false);
   const webrtcBase =
     process.env.NEXT_PUBLIC_WEBRTC_BASE || "http://localhost:8889";
   const path = webrtcPath || (cameraId === "cam_in" ? "demo" : cameraId);
+
+  // HLS fallback URL (MediaMTX serves HLS on 8888 from the same path)
+  const hlsBase = webrtcBase.replace(":8889", ":8888");
+  const hlsUrl = `${hlsBase}/${path}/index.m3u8`;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -42,7 +47,7 @@ export function CameraTile({
     return () => ro.disconnect();
   }, []);
 
-  // WHEP live video path (MediaMTX)
+  // WHEP live video path (MediaMTX) with HLS fallback for codec issues (e.g. H265 source)
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -52,8 +57,21 @@ export function CameraTile({
 
     const endpoint = whepUrl(webrtcBase, path);
 
+    const tryHls = () => {
+      if (cancelled) return;
+      setUseHlsFallback(true);
+      setVideoOk(false);
+      setVideoError("WHEP codec incompatible (H265 source) — using HLS fallback");
+      video.srcObject = null;
+      video.src = hlsUrl;
+      video.play().catch(() => {});
+      // HLS is one-shot; no auto WHEP retry while in fallback
+    };
+
     const start = async () => {
+      if (useHlsFallback) return; // stay on HLS once chosen
       setVideoError(null);
+      setUseHlsFallback(false);
       try {
         handle = await connectWhep(endpoint, video);
         if (cancelled) {
@@ -64,8 +82,19 @@ export function CameraTile({
       } catch (err) {
         if (cancelled) return;
         setVideoOk(false);
-        setVideoError(err instanceof Error ? err.message : "WHEP failed");
-        // retry when MediaMTX comes online
+        const raw = err instanceof Error ? err.message : "WHEP failed";
+        if (raw.includes("400")) {
+          // Codec problem (very common with H265/HEVC cameras + standard browser WebRTC)
+          setVideoError("WHEP 400 (codec mismatch — H265 source vs browser)");
+          tryHls();
+          return;
+        }
+        const display =
+          raw.toLowerCase().includes("network") || raw.includes("fetch")
+            ? `MediaMTX unreachable at ${webrtcBase} (docker compose up -d mediamtx?)`
+            : raw;
+        setVideoError(display);
+        // retry WHEP
         retryTimer = setTimeout(start, 4000);
       }
     };
@@ -76,10 +105,15 @@ export function CameraTile({
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
       handle?.close();
+      // cleanup HLS if active
+      if (video.src) {
+        video.pause();
+        video.src = "";
+      }
     };
-  }, [webrtcBase, path]);
+  }, [webrtcBase, path, hlsUrl, useHlsFallback]);
 
-  const showVideo = videoOk;
+  const showVideo = videoOk || useHlsFallback;
 
   return (
     <div
@@ -94,15 +128,17 @@ export function CameraTile({
       <video
         ref={videoRef}
         className={`absolute inset-0 z-0 h-full w-full object-cover ${
-          showVideo ? "opacity-100" : "opacity-0"
+          showVideo || useHlsFallback ? "opacity-100" : "opacity-0"
         }`}
         playsInline
         muted
         autoPlay
+        // For HLS fallback we set .src ; for WHEP we set .srcObject in connectWhep
+        src={useHlsFallback ? hlsUrl : undefined}
         data-testid="camera-video"
       />
 
-      {!showVideo && (
+      {!showVideo && !useHlsFallback && (
         <div className="absolute inset-0 z-[1] flex items-center justify-center bg-gradient-to-b from-[#0a0a0a] to-[#111]">
           <div className="text-center px-4">
             <div className="font-mono text-[10px] uppercase tracking-label text-muted">
@@ -118,6 +154,13 @@ export function CameraTile({
               Canvas HUD from WS · video via MediaMTX when stream is live
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Small indicator when HLS fallback is active */}
+      {useHlsFallback && (
+        <div className="absolute top-2 right-2 z-30 bg-black/60 px-1.5 py-0.5 text-[9px] text-muted">
+          HLS fallback
         </div>
       )}
 

@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     cam_in_webrtc_path: str = "demo"
     cam_out_webrtc_path: str = "cam_out"
 
+    # Real camera integration (highest quality feed) - populated from .env
+    # When ip_camera_user + ip_camera_pass are set, effective_cam_in_rtsp builds
+    # the authenticated high-quality URL (stream1 = 2560x1440 H.265 on this camera).
+    ip_camera_user: str = ""
+    ip_camera_pass: str = ""
+    cam_ip: str = "10.39.45.167"
+    cam_high_quality_path: str = "stream1"
+
     # Vision
     insightface_model: str = "buffalo_l"
     vision_target_fps: float = 5.0
@@ -55,6 +63,16 @@ class Settings(BaseSettings):
     vote_min_hits: int = 3
     min_enroll_images: int = 1  # demo-friendly; raise for production
 
+    # Vision acceleration (Intel Linux + OpenVINO / VAAPI focused; safe defaults)
+    onnx_providers: str = "CPUExecutionProvider"  # comma-separated, order matters. e.g. "OpenVINOExecutionProvider,CPUExecutionProvider"
+    onnx_intra_op_num_threads: int = 0  # 0=let runtime decide; set 4-8 on hybrid CPUs
+    onnx_inter_op_num_threads: int = 0
+    capture_backend: str = "auto"  # auto | opencv_ffmpeg | ffmpeg_vaapi
+    vision_adaptive: bool = False
+
+    # Note: the high-quality camera integration (2560x1440 H.265) benefits greatly
+    # from CAPTURE_BACKEND=auto (VAAPI decode + scale) on this hardware.
+
     # Attendance
     cooldown_seconds: float = 90.0
     min_dwell_seconds: float = 30.0
@@ -67,6 +85,28 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def onnx_providers_list(self) -> list[str]:
+        """Parsed list for FaceAnalysis providers= kwarg. Strips whitespace."""
+        raw = (self.onnx_providers or "CPUExecutionProvider").strip()
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return parts or ["CPUExecutionProvider"]
+
+    @property
+    def effective_cam_in_rtsp(self) -> str:
+        """Highest-quality RTSP URL for cam_in.
+
+        If CAM_IN_RTSP already contains auth (@), use it verbatim (override).
+        Otherwise, when IP_CAMERA_USER/PASS are present in .env, build the
+        authenticated high-quality stream (2560x1440 H.265 on this camera).
+        """
+        if self.cam_in_rtsp and "@" in self.cam_in_rtsp:
+            return self.cam_in_rtsp
+        if self.ip_camera_user and self.ip_camera_pass:
+            auth = f"{self.ip_camera_user}:{self.ip_camera_pass}@"
+            return f"rtsp://{auth}{self.cam_ip}:554/{self.cam_high_quality_path}"
+        return self.cam_in_rtsp
 
     @property
     def resolved_data_dir(self) -> Path:

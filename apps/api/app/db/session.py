@@ -49,11 +49,13 @@ def seed_cameras(db: Session) -> None:
     existing = db.scalars(select(Camera)).all()
     if existing:
         return
+    # Use effective (high-quality when IP_CAMERA_* present) or explicit CAM_IN_RTSP
+    cam_in_rtsp = getattr(settings, "effective_cam_in_rtsp", settings.cam_in_rtsp)
     cams = [
         Camera(
             id="cam_in",
             name="Entrance",
-            rtsp_url=settings.cam_in_rtsp,
+            rtsp_url=cam_in_rtsp,
             webrtc_path=settings.cam_in_webrtc_path,
             direction=settings.cam_in_direction,
             enabled=True,

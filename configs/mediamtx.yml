@@ -22,8 +22,11 @@ paths:
     source: publisher
 
   cam_in:
-    # Point at real camera or leave as publisher / use demo
-    source: publisher
+    # Highest quality feed (2560x1440 H.265) when IP_CAMERA_* are set in .env.
+    # docker-compose loads .env so ${...} substitution works.
+    source: rtsp://${IP_CAMERA_USER}:${IP_CAMERA_PASS}@${CAM_IP:-10.39.45.167}:554/${CAM_HIGH_QUALITY_PATH:-stream1}
+    # Fallback comment for manual edit if substitution not desired:
+    # source: rtsp://admin:campkspQq123@10.39.45.167:554/stream1
 
   cam_out:
     source: publisher

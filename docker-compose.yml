@@ -7,6 +7,8 @@ services:
       - "8888:8888"   # HLS
       - "8889:8889"   # WebRTC
       - "9997:9997"   # API
+    env_file:
+      - .env   # Enables ${IP_CAMERA_USER} etc. substitution in mediamtx.yml
     volumes:
       - ./configs/mediamtx.yml:/mediamtx.yml:ro
     restart: unless-stopped

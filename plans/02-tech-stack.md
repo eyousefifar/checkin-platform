@@ -152,7 +152,7 @@ python-multipart
 opencv-python-headless
 numpy
 insightface
-onnxruntime          # or platform-specific EP package after testing
+onnxruntime          # or platform-specific EP package after testing (OpenVINOExecutionProvider supported)
 Pillow
 aiofiles
 httpx                # optional health checks

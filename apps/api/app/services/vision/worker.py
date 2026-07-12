@@ -186,6 +186,29 @@ class VisionWorker:
             time.sleep(0.08)
 
     def _capture_loop(self, camera_id: str, rtsp_url: str, buf: LatestFrameBuffer) -> None:
+        """Dispatch to appropriate backend based on settings."""
+        import os
+
+        settings = get_settings()
+        backend = (settings.capture_backend or "auto").lower()
+        if backend == "auto":
+            backend = self._detect_best_backend()
+
+        if backend in ("ffmpeg_vaapi", "vaapi", "ffmpeg"):
+            self._capture_loop_ffmpeg_vaapi(camera_id, rtsp_url, buf)
+        else:
+            self._capture_loop_opencv(camera_id, rtsp_url, buf)
+
+    def _detect_best_backend(self) -> str:
+        """Prefer VAAPI pipe on this Intel Linux hardware when DRI render node exists."""
+        import os
+        import sys
+        if sys.platform.startswith("linux") and os.path.exists("/dev/dri/renderD128"):
+            return "ffmpeg_vaapi"
+        return "opencv_ffmpeg"
+
+    def _capture_loop_opencv(self, camera_id: str, rtsp_url: str, buf: LatestFrameBuffer) -> None:
+        """Original software-decode path (fallback everywhere)."""
         import cv2
 
         while not self._stop.is_set():
@@ -212,20 +235,94 @@ class VisionWorker:
             cap.release()
             time.sleep(1)
 
+    def _capture_loop_ffmpeg_vaapi(self, camera_id: str, rtsp_url: str, buf: LatestFrameBuffer) -> None:
+        """Hardware decode path using ffmpeg + VAAPI (Intel iGPU). Fixed scale for reliable raw BGR pipe."""
+        import os
+        import subprocess
+
+        # Fixed working resolution for the pipe (matches common cams + det_size budget).
+        # Change via code or later make configurable; quality gate tolerates it.
+        TARGET_W, TARGET_H = 1280, 720
+        FRAME_BYTES = TARGET_W * TARGET_H * 3
+
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-hwaccel", "vaapi",
+            "-hwaccel_device", "/dev/dri/renderD128",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-an",
+            "-vf", f"scale={TARGET_W}:{TARGET_H},format=bgr24",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-",
+        ]
+
+        while not self._stop.is_set():
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=10**7,
+                )
+                self.online[camera_id] = True
+                while not self._stop.is_set():
+                    raw = proc.stdout.read(FRAME_BYTES) if proc.stdout else b""
+                    if not raw or len(raw) < FRAME_BYTES:
+                        self.online[camera_id] = False
+                        break
+                    frame = np.frombuffer(raw, dtype="uint8").reshape((TARGET_H, TARGET_W, 3)).copy()
+                    buf.set(frame)
+            except Exception:  # noqa: BLE001
+                self.online[camera_id] = False
+            finally:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=1)
+                    except Exception:
+                        pass
+            time.sleep(1.5)  # backoff before retry
+
     def _process_loop(self, camera_id: str, buf: LatestFrameBuffer, target_fps: float) -> None:
-        interval = 1.0 / max(target_fps, 0.5)
+        """Process loop. Re-reads settings each iteration for adaptive / runtime changes."""
         self.trackers.setdefault(camera_id, TrackerState())
         last = 0.0
         frames = 0
         fps_t0 = time.time()
         metrics_t0 = time.time()
+        current_interval = 1.0 / max(target_fps, 0.5)
+        recent_proc_times: list[float] = []
 
         while not self._stop.is_set():
+            # Re-fetch to support adaptive and changed env (get_settings is cached; we bypass for live)
+            try:
+                s = get_settings.__wrapped__() if hasattr(get_settings, "__wrapped__") else get_settings()
+            except Exception:
+                s = get_settings()
+            target = float(getattr(s, "vision_target_fps", target_fps) or target_fps)
+            adaptive = bool(getattr(s, "vision_adaptive", False))
+
+            interval = 1.0 / max(target, 0.5)
+            # simple adaptive: nudge target based on observed processing cost
+            if adaptive and recent_proc_times:
+                avg_cost = sum(recent_proc_times) / len(recent_proc_times)
+                if avg_cost < interval * 0.6:
+                    target = min(target + 0.5, 15.0)
+                    interval = 1.0 / max(target, 0.5)
+                elif avg_cost > interval * 1.3:
+                    target = max(target - 0.5, 1.0)
+                    interval = 1.0 / max(target, 0.5)
+
             now = time.time()
             if now - last < interval:
                 time.sleep(0.005)
                 continue
             last = now
+
+            t0 = time.time()
             frame, fts = buf.get()
             if frame is None:
                 continue
@@ -236,6 +333,11 @@ class VisionWorker:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("vision infer failed: %s", exc)
                 continue
+
+            proc_cost = time.time() - t0
+            recent_proc_times.append(proc_cost)
+            if len(recent_proc_times) > 8:
+                recent_proc_times.pop(0)
 
             frames += 1
             if time.time() - fps_t0 >= 2:

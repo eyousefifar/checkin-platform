@@ -53,6 +53,26 @@ chmod +x scripts/*.sh
 # or SAMPLE=/path/to/lobby.mp4 ./scripts/demo_rtsp.sh
 ```
 
+### Real high-quality IP camera (10.39.45.167)
+
+The highest-quality stream on this camera is H.265 2560x1440 (path `stream1`).
+
+1. Put the credentials in `.env` (they are already present as `IP_CAMERA_USER`/`IP_CAMERA_PASS`).
+2. The app will auto-build the authenticated URL when you start with a fresh DB (or delete `data/pksp.db`).
+3. Make sure MediaMTX is configured to pull it (the repo now uses env substitution).
+
+```bash
+# (re)seed with the real camera
+rm -f data/pksp.db
+docker compose up -d mediamtx
+export $(grep -v '^#' .env | xargs)
+# then start the API as usual
+```
+
+In the dashboard you should now see the real high-res feed for "Entrance" and vision processing it (VAAPI decode is used automatically on this hardware when `CAPTURE_BACKEND=auto`).
+
+To force a specific URL, set `CAM_IN_RTSP=rtsp://admin:campkspQq123@10.39.45.167:554/stream1` (and `CAM_IN_WEBRTC_PATH=cam_in`).
+
 ### 3. API (Python 3.11 recommended)
 
 ```bash
@@ -107,6 +127,8 @@ See `.env.example`. Important knobs:
 | `VISION_TARGET_FPS` | 5 | CPU budget |
 | `DET_SIZE` | 640 | Lower if overloaded |
 | `MOCK_VISION` | true | Synthetic engine for offline demo |
+| `ONNX_PROVIDERS` | CPUExecutionProvider | Comma list. Try `OpenVINOExecutionProvider,CPUExecutionProvider` on Intel |
+| `CAPTURE_BACKEND` | auto | `auto` (picks VAAPI on this HW), `opencv_ffmpeg`, `ffmpeg_vaapi` |
 
 ## Tests
 
@@ -125,6 +147,17 @@ Coverage includes: embedding pack/unpack, cosine match + margin, quality gate, I
 - **Mock vision** mode proves UX without models; set `MOCK_VISION=false` after `scripts/download_models.sh`
 - Profile / backlight / tiny faces will miss — quality gate rejects weak evidence
 - Trusted LAN only — no public internet hardening
+
+## Optimizing for this hardware (Intel Core 5 220H + iGPU)
+
+The platform detects Raptor Lake-P iGPU and prefers hardware paths when available:
+
+- Set `ONNX_PROVIDERS=OpenVINOExecutionProvider,CPUExecutionProvider` (after `pip install openvino`)
+- `CAPTURE_BACKEND=auto` (or `ffmpeg_vaapi`) uses VAAPI decode via ffmpeg for lower CPU on RTSP ingest
+- `VISION_TARGET_FPS` and `DET_SIZE` remain primary knobs
+- `VISION_ADAPTIVE=true` enables simple self-tuning of interval
+- See `.env.example` and the detailed plan in the session artifacts for full guidance + verification steps.
+- `vainfo` + `intel-media-va-driver-non-free` recommended for confirming VAAPI.
 
 ## Design docs
 

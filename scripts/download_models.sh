@@ -18,9 +18,11 @@ import os
 print("Downloading / verifying InsightFace buffalo_l …")
 try:
     from insightface.app import FaceAnalysis
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    providers = os.environ.get("ONNX_PROVIDERS", "CPUExecutionProvider").split(",")
+    providers = [p.strip() for p in providers if p.strip()] or ["CPUExecutionProvider"]
+    app = FaceAnalysis(name="buffalo_l", providers=providers)
     app.prepare(ctx_id=-1, det_size=(640, 640))
-    print("OK: buffalo_l ready")
+    print("OK: buffalo_l ready (providers=%s)" % providers)
 except Exception as e:
     print("WARN: model download failed:", e)
     print("Demo can still run with MOCK_VISION=true")
