@@ -12,7 +12,7 @@ use pksp_db::{
     build_daily, create_employee as db_create, daily_csv as db_daily_csv, employee_dict,
     list_cameras, list_employees as db_list_employees,
 };
-use pksp_vision::{enroll_images, reload_gallery};
+use pksp_vision::enroll_images;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -201,33 +201,70 @@ pub async fn upload_images(
     if exists.is_none() {
         return Err(AppError::NotFound("Not found".into()));
     }
-    let mut files = Vec::new();
-    while let Some(field) = multipart
+
+    let max_files = state.settings.max_enroll_files;
+    let max_file = state.settings.max_enroll_file_bytes;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?
     {
-        let name = field.file_name().unwrap_or("upload.jpg").to_string();
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| AppError::BadRequest(e.to_string()))?
-            .to_vec();
+        // Accept only file parts (multipart file fields have a file_name).
+        let Some(name) = field.file_name().map(|s| s.to_string()) else {
+            return Err(AppError::BadRequest("only file fields are accepted".into()));
+        };
+        if files.len() >= max_files {
+            return Err(AppError::BadRequest(format!(
+                "too many files; max is {max_files}"
+            )));
+        }
+        // Chunked read — stop before exceeding per-file limit (do not field.bytes() first).
+        let mut data = Vec::new();
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if data.len().saturating_add(chunk.len()) > max_file {
+                        return Err(AppError::BadRequest(format!(
+                            "file exceeds max size of {max_file} bytes"
+                        )));
+                    }
+                    data.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(AppError::BadRequest(e.to_string())),
+            }
+        }
+        if data.is_empty() {
+            return Err(AppError::BadRequest("empty image".into()));
+        }
+        pksp_vision::validate_enroll_image_bytes(&data, &state.settings)
+            .map_err(AppError::BadRequest)?;
         files.push((name, data));
     }
+
+    if files.is_empty() {
+        return Err(AppError::BadRequest("no images provided".into()));
+    }
+
     let result = enroll_images(
         &state.pool,
         &state.settings,
-        state.engine.as_ref(),
+        state.engine.clone(),
         id,
         files,
+        Some(&state.gallery),
     )
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    reload_gallery(&state.pool, &state.gallery, &state.settings)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    .map_err(|e| {
+        let msg = e.to_string();
+        if let Some(rest) = msg.strip_prefix("validation: ") {
+            AppError::BadRequest(rest.to_string())
+        } else {
+            AppError::Internal(msg)
+        }
+    })?;
     Ok(Json(result))
 }
 
@@ -236,54 +273,25 @@ pub async fn recompute_embedding(
     _auth: AuthUser,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
-    // Re-read images from disk and recompute via empty upload path
-    let rows = sqlx::query("SELECT file_path FROM employee_images WHERE employee_id=?")
+    let exists = sqlx::query("SELECT id FROM employees WHERE id=?")
         .bind(id)
-        .fetch_all(&state.pool)
+        .fetch_optional(&state.pool)
         .await?;
-    let mut files = Vec::new();
-    for r in rows {
-        let rel: String = r.get("file_path");
-        let path = state.settings.data_dir.join(&rel);
-        if let Ok(data) = std::fs::read(&path) {
-            files.push((
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("img.jpg")
-                    .to_string(),
-                data,
-            ));
-        }
+    if exists.is_none() {
+        return Err(AppError::NotFound("Not found".into()));
     }
-    // Clear and re-add would duplicate — for MVP recompute from files without re-inserting images:
-    // simplify: just re-run mean on existing usable images via enroll of temp re-read without add
-    // For contract: return enroll-like shape
-    if files.is_empty() {
-        return Ok(Json(json!({
-            "received": 0,
-            "usable": 0,
-            "rejected": [],
-            "embedding_ready": false,
-            "num_images_used": 0,
-        })));
-    }
-    // Delete image rows then re-enroll (keeps files)
-    sqlx::query("DELETE FROM employee_images WHERE employee_id=?")
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+
+    // Zero new files — reanalyze existing rows in place (preserve ids/paths).
     let result = enroll_images(
         &state.pool,
         &state.settings,
-        state.engine.as_ref(),
+        state.engine.clone(),
         id,
-        files,
+        Vec::new(),
+        Some(&state.gallery),
     )
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
-    reload_gallery(&state.pool, &state.gallery, &state.settings)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(result))
 }
 

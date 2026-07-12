@@ -151,6 +151,7 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 ///
 /// Safe for in-process tests: does not bind a listener or start media/vision workers.
 pub fn app(state: AppState) -> Router {
+    use axum::extract::DefaultBodyLimit;
     use axum::http::{header, HeaderValue, Method};
     let cors = if state.settings.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new()
@@ -183,6 +184,8 @@ pub fn app(state: AppState) -> Router {
             .allow_credentials(true)
     };
 
+    let enroll_body_limit = state.settings.max_enroll_upload_bytes;
+
     Router::new()
         .route("/api/health", get(routes::health))
         .route("/api/auth/login", post(routes::login))
@@ -194,7 +197,10 @@ pub fn app(state: AppState) -> Router {
             "/api/employees/{id}",
             get(routes::get_employee).patch(routes::update_employee),
         )
-        .route("/api/employees/{id}/images", post(routes::upload_images))
+        .route(
+            "/api/employees/{id}/images",
+            post(routes::upload_images).layer(DefaultBodyLimit::max(enroll_body_limit)),
+        )
         .route(
             "/api/employees/{id}/recompute-embedding",
             post(routes::recompute_embedding),

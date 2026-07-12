@@ -15,7 +15,7 @@ use pksp_core::{
     mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate_extended, should_vote,
     track_zone, trajectory_is_walkby, Detection, MatchResult, TrackerState, ZoneMap,
 };
-use pksp_db::{bump_gallery_version, commit_identity, load_gallery_matrix, Settings};
+use pksp_db::{commit_identity, load_gallery_matrix, Settings};
 use serde_json::json;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -1203,134 +1203,447 @@ fn crop_gray_luma(
     Some((gray, cw, ch))
 }
 
-/// Enroll images using FaceEngine (mock-safe).
+/// Ordinary per-image analysis outcome (not a systemic failure).
+#[derive(Debug, Clone)]
+struct ImageAnalysis {
+    /// Client-facing filename (original upload name or basename of stored path).
+    filename: String,
+    existing_id: Option<i64>,
+    /// Absolute staged path for a new upload (under employee dir).
+    staged_abs: Option<std::path::PathBuf>,
+    /// Relative final path for a new upload after promote.
+    final_rel: Option<String>,
+    usable: bool,
+    reason: Option<String>,
+    embedding: Option<Vec<f32>>,
+}
+
+/// Validate enrollment image bytes: format, dimensions, pixel budget.
+/// Returns detected format extension (`jpg`/`png`/`webp`).
+pub fn validate_enroll_image_bytes(data: &[u8], settings: &Settings) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("empty image".into());
+    }
+    if data.len() > settings.max_enroll_file_bytes {
+        return Err(format!(
+            "file exceeds max size of {} bytes",
+            settings.max_enroll_file_bytes
+        ));
+    }
+    let format =
+        image::guess_format(data).map_err(|_| "unsupported or corrupt image".to_string())?;
+    let ext = match format {
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::WebP => "webp",
+        _ => return Err("unsupported image format; use JPEG, PNG, or WebP".into()),
+    };
+    // Dimension probe without full decode allocation of the pixel buffer.
+    let reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|_| "unsupported or corrupt image".to_string())?;
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|_| "unsupported or corrupt image".to_string())?;
+    if w > settings.max_enroll_image_dim || h > settings.max_enroll_image_dim {
+        return Err(format!(
+            "image dimensions {w}x{h} exceed max {}",
+            settings.max_enroll_image_dim
+        ));
+    }
+    let pixels = (w as u64).saturating_mul(h as u64);
+    if pixels > settings.max_enroll_pixels {
+        return Err(format!(
+            "image pixel count {pixels} exceeds max {}",
+            settings.max_enroll_pixels
+        ));
+    }
+    // Full decode under the same limits (guards corrupt payloads that pass headers).
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(settings.max_enroll_image_dim);
+    limits.max_image_height = Some(settings.max_enroll_image_dim);
+    limits.max_alloc = Some(settings.max_enroll_pixels.saturating_mul(4));
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|_| "unsupported or corrupt image".to_string())?;
+    reader.limits(limits);
+    let _ = reader
+        .decode()
+        .map_err(|_| "unsupported or corrupt image".to_string())?;
+    Ok(ext.to_string())
+}
+
+fn analyze_bgr_image(
+    engine: &dyn FaceEngine,
+    settings: &Settings,
+    w: u32,
+    h: u32,
+    bgr: &[u8],
+) -> Result<(Option<Vec<f32>>, Option<String>), FaceError> {
+    let faces = engine.detect_and_embed(w, h, bgr)?;
+    if faces.is_empty() {
+        return Ok((None, Some("no_face".into())));
+    }
+    if faces.len() > 1 {
+        return Ok((None, Some("multiple_faces".into())));
+    }
+    let face = &faces[0];
+    if face.embedding.iter().any(|v| !v.is_finite()) {
+        return Err(FaceError::BadEmbedding);
+    }
+    let gray = crop_gray_luma(bgr, w, h, face.bbox);
+    let q = quality_gate_extended(
+        face.det_score,
+        face.bbox,
+        settings.min_det_score,
+        settings.min_face_px,
+        w as i32,
+        h as i32,
+        false,
+        face.landmarks.as_ref(),
+        gray.as_ref().map(|(g, gw, gh)| (g.as_slice(), *gw, *gh)),
+        settings.pose_max_yaw,
+        settings.blur_min_var,
+        0.0,
+        255.0,
+    );
+    if !q.ok {
+        Ok((None, q.reason))
+    } else {
+        Ok((Some(face.embedding.clone()), None))
+    }
+}
+
+fn decode_to_bgr(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let im = image::load_from_memory(data).map_err(|_| "decode_error".to_string())?;
+    let rgb = im.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut bgr = Vec::with_capacity((w * h * 3) as usize);
+    for p in rgb.pixels() {
+        bgr.push(p[2]);
+        bgr.push(p[1]);
+        bgr.push(p[0]);
+    }
+    Ok((w, h, bgr))
+}
+
+fn short_uid() -> String {
+    let uid = uuid::Uuid::new_v4().simple().to_string();
+    uid[..12.min(uid.len())].to_string()
+}
+
+/// Analyze one image file on disk or in memory. Systemic FaceError is returned;
+/// missing/corrupt *existing* files become ordinary rejections.
+#[allow(clippy::too_many_arguments)] // private analysis helper; groups would obscure existing vs staged paths
+fn analyze_one(
+    engine: &dyn FaceEngine,
+    settings: &Settings,
+    filename: &str,
+    existing_id: Option<i64>,
+    staged_abs: Option<std::path::PathBuf>,
+    final_rel: Option<String>,
+    bytes: Option<&[u8]>,
+    abs_path: Option<&std::path::Path>,
+    is_new_upload: bool,
+) -> Result<ImageAnalysis, FaceError> {
+    let load = if let Some(b) = bytes {
+        decode_to_bgr(b)
+    } else if let Some(p) = abs_path {
+        match std::fs::read(p) {
+            Ok(data) => decode_to_bgr(&data),
+            Err(_) => Err("unreadable".into()),
+        }
+    } else {
+        Err("missing".into())
+    };
+
+    match load {
+        Ok((w, h, bgr)) => match analyze_bgr_image(engine, settings, w, h, &bgr) {
+            Ok((emb, reason)) => Ok(ImageAnalysis {
+                filename: filename.to_string(),
+                existing_id,
+                staged_abs,
+                final_rel,
+                usable: emb.is_some(),
+                reason,
+                embedding: emb,
+            }),
+            Err(e) => Err(e),
+        },
+        Err(code) => {
+            if is_new_upload {
+                // New uploads are validated before staging; decode here is systemic.
+                Err(FaceError::InvalidInput)
+            } else {
+                Ok(ImageAnalysis {
+                    filename: filename.to_string(),
+                    existing_id,
+                    staged_abs: None,
+                    final_rel: None,
+                    usable: false,
+                    reason: Some(code),
+                    embedding: None,
+                })
+            }
+        }
+    }
+}
+
+/// Enroll or recompute: reanalyze existing rows plus optional new files; one transactional persist.
+///
+/// New file bytes must already pass [`validate_enroll_image_bytes`]. `new_files` empty ⇒ recompute.
+/// Gallery reload runs after commit when `gallery` is provided; failures are non-fatal and surface
+/// as `gallery_reload_pending: true`.
 pub async fn enroll_images(
     pool: &SqlitePool,
     settings: &Settings,
-    engine: &dyn FaceEngine,
+    engine: Arc<dyn FaceEngine>,
     employee_id: i64,
-    files: Vec<(String, Vec<u8>)>,
+    new_files: Vec<(String, Vec<u8>)>,
+    gallery: Option<&Arc<RwLock<Gallery>>>,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut rejected = Vec::new();
-    let mut usable = 0usize;
-    let mut vectors = Vec::new();
+    let received = new_files.len();
     let dest = settings.enroll_dir().join(employee_id.to_string());
     std::fs::create_dir_all(&dest)?;
 
-    for (filename, data) in &files {
-        let img = image::load_from_memory(data);
-        let (emb, reason) = match img {
-            Ok(im) => {
-                let rgb = im.to_rgb8();
-                let (w, h) = rgb.dimensions();
-                let mut bgr = Vec::with_capacity((w * h * 3) as usize);
-                for p in rgb.pixels() {
-                    bgr.push(p[2]);
-                    bgr.push(p[1]);
-                    bgr.push(p[0]);
-                }
-                let faces = match engine.detect_and_embed(w, h, &bgr) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        return Ok(json!({
-                            "ok": false,
-                            "error": e.to_string(),
-                            "usable": 0,
-                            "rejected": [],
-                        }));
-                    }
-                };
-                if faces.is_empty() {
-                    (None, Some("no_face".to_string()))
-                } else {
-                    let mut faces = faces;
-                    faces.sort_by(|a, b| {
-                        let aa = (a.bbox.2 - a.bbox.0) * (a.bbox.3 - a.bbox.1);
-                        let bb = (b.bbox.2 - b.bbox.0) * (b.bbox.3 - b.bbox.1);
-                        bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    let face = &faces[0];
-                    let gray = crop_gray_luma(&bgr, w, h, face.bbox);
-                    let q = quality_gate_extended(
-                        face.det_score,
-                        face.bbox,
-                        settings.min_det_score,
-                        settings.min_face_px,
-                        w as i32,
-                        h as i32,
-                        false,
-                        face.landmarks.as_ref(),
-                        gray.as_ref().map(|(g, gw, gh)| (g.as_slice(), *gw, *gh)),
-                        settings.pose_max_yaw,
-                        settings.blur_min_var,
-                        0.0,
-                        255.0,
-                    );
-                    if !q.ok {
-                        (None, q.reason)
-                    } else {
-                        (Some(face.embedding.clone()), None)
-                    }
-                }
+    // Stage new files first (UUID staging names). Cleaned on any pre-commit failure.
+    let mut staged_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut staged_meta: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    // (filename, staged_abs, final_rel)
+    for (filename, data) in &new_files {
+        let ext = validate_enroll_image_bytes(data, settings)
+            .map_err(|e| anyhow::anyhow!("validation: {e}"))?;
+        let uid = short_uid();
+        let staged = dest.join(format!(".staging-{uid}.{ext}"));
+        let final_rel = format!("enroll/{employee_id}/{uid}.{ext}");
+        std::fs::write(&staged, data)?;
+        staged_paths.push(staged.clone());
+        staged_meta.push((filename.clone(), staged, final_rel));
+    }
+
+    let existing = pksp_db::list_employee_images(pool, employee_id).await?;
+
+    // Blocking analysis of all images (existing + staged) — plan 005 boundary.
+    let settings_c = settings.clone();
+    let engine_c = engine.clone();
+    let analysis_join = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for row in &existing {
+            let abs = settings_c.data_dir.join(&row.file_path);
+            let name = std::path::Path::new(&row.file_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(row.file_path.as_str())
+                .to_string();
+            match analyze_one(
+                engine_c.as_ref(),
+                &settings_c,
+                &name,
+                Some(row.id),
+                None,
+                None,
+                None,
+                Some(&abs),
+                false,
+            ) {
+                Ok(a) => out.push(a),
+                Err(e) => return Err(e),
             }
-            Err(_) => (None, Some("decode_error".to_string())),
-        };
-
-        let uid = uuid::Uuid::new_v4().simple().to_string();
-        let uid = &uid[..12.min(uid.len())];
-        let ext = std::path::Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("jpg");
-        let rel = format!("enroll/{employee_id}/{uid}.{ext}");
-        let abs = settings.data_dir.join(&rel);
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&abs, data)?;
+        for (filename, staged, final_rel) in &staged_meta {
+            match analyze_one(
+                engine_c.as_ref(),
+                &settings_c,
+                filename,
+                None,
+                Some(staged.clone()),
+                Some(final_rel.clone()),
+                None,
+                Some(staged.as_path()),
+                true,
+            ) {
+                Ok(a) => out.push(a),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    })
+    .await;
 
-        let ok = emb.is_some();
-        pksp_db::add_employee_image(pool, employee_id, &rel, ok, reason.as_deref()).await?;
-        if let Some(v) = emb {
-            vectors.push(v);
-            usable += 1;
+    let analyses = match analysis_join {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            for p in &staged_paths {
+                let _ = std::fs::remove_file(p);
+            }
+            anyhow::bail!("enrollment analysis failed: {e}");
+        }
+        Err(join_e) => {
+            for p in &staged_paths {
+                let _ = std::fs::remove_file(p);
+            }
+            anyhow::bail!("enrollment analysis join failed: {join_e}");
+        }
+    };
+
+    // Promote staged → final paths before DB commit (recovery deletes only new files).
+    let mut promoted_finals: Vec<std::path::PathBuf> = Vec::new();
+    let promote = (|| -> anyhow::Result<()> {
+        for a in &analyses {
+            if let (Some(staged), Some(rel)) = (&a.staged_abs, &a.final_rel) {
+                let final_abs = settings.data_dir.join(rel);
+                if let Some(parent) = final_abs.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if let Err(e) = std::fs::rename(staged, &final_abs) {
+                    // Cross-device rename fallback.
+                    std::fs::copy(staged, &final_abs).map_err(|_| e)?;
+                    let _ = std::fs::remove_file(staged);
+                }
+                promoted_finals.push(final_abs);
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = promote {
+        for p in &staged_paths {
+            let _ = std::fs::remove_file(p);
+        }
+        for p in &promoted_finals {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
+    }
+
+    let vectors: Vec<Vec<f32>> = analyses
+        .iter()
+        .filter_map(|a| a.embedding.clone())
+        .collect();
+    let usable_count = vectors.len();
+    let model_name = engine.model_name().to_string();
+    let min_n = settings.min_enroll_images;
+    let dim = settings.embedding_dim;
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            for p in &promoted_finals {
+                let _ = std::fs::remove_file(p);
+            }
+            for p in &staged_paths {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(e.into());
+        }
+    };
+
+    let db_result: anyhow::Result<()> = async {
+        for a in &analyses {
+            if let Some(id) = a.existing_id {
+                pksp_db::update_employee_image_tx(&mut tx, id, a.usable, a.reason.as_deref())
+                    .await?;
+            } else if let Some(rel) = &a.final_rel {
+                pksp_db::add_employee_image_tx(
+                    &mut tx,
+                    employee_id,
+                    rel,
+                    a.usable,
+                    a.reason.as_deref(),
+                )
+                .await?;
+            }
+        }
+
+        if usable_count >= min_n {
+            let mean = mean_l2_embedding(&vectors, dim)?;
+            let blob = pack_embedding(&mean, dim)?;
+            pksp_db::save_embedding_tx(
+                &mut tx,
+                employee_id,
+                &blob,
+                dim,
+                usable_count as i32,
+                &model_name,
+            )
+            .await?;
         } else {
+            pksp_db::delete_embedding_tx(&mut tx, employee_id).await?;
+        }
+        pksp_db::bump_gallery_version_tx(&mut tx).await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = db_result {
+        let _ = tx.rollback().await;
+        for p in &promoted_finals {
+            let _ = std::fs::remove_file(p);
+        }
+        for p in &staged_paths {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e);
+    }
+    if let Err(e) = tx.commit().await {
+        for p in &promoted_finals {
+            let _ = std::fs::remove_file(p);
+        }
+        return Err(e.into());
+    }
+
+    // Remove any leftover staging files after successful promote.
+    for p in &staged_paths {
+        let _ = std::fs::remove_file(p);
+    }
+
+    let embedding_ready = usable_count >= min_n;
+    let mut rejected = Vec::new();
+    let mut results = Vec::new();
+    for a in &analyses {
+        results.push(json!({
+            "filename": a.filename,
+            "usable": a.usable,
+            "reason": a.reason,
+        }));
+        if !a.usable {
             rejected.push(json!({
-                "filename": filename,
-                "reason": reason.unwrap_or_else(|| "no_face".into())
+                "filename": a.filename,
+                "reason": a.reason.clone().unwrap_or_else(|| "rejected".into()),
             }));
         }
     }
 
-    let embedding_ready = if vectors.len() >= settings.min_enroll_images {
-        let mean = mean_l2_embedding(&vectors, settings.embedding_dim)?;
-        let blob = pack_embedding(&mean, settings.embedding_dim)?;
-        pksp_db::save_embedding(
-            pool,
-            employee_id,
-            &blob,
-            settings.embedding_dim,
-            vectors.len() as i32,
-            engine.model_name(),
-        )
-        .await?;
-        true
-    } else {
-        false
-    };
+    let mut gallery_reload_pending = false;
+    if let Some(g) = gallery {
+        match reload_gallery(pool, g, settings).await {
+            Ok(()) => {}
+            Err(e1) => match reload_gallery(pool, g, settings).await {
+                Ok(()) => {}
+                Err(e2) => {
+                    warn!(
+                        employee_id,
+                        error = %e2,
+                        first_error = %e1,
+                        "gallery reload failed after enrollment commit"
+                    );
+                    gallery_reload_pending = true;
+                }
+            },
+        }
+    }
 
-    let _ = bump_gallery_version(pool).await?;
     info!(
-        "enroll employee={employee_id} received={} usable={usable} ready={embedding_ready}",
-        files.len()
+        "enroll employee={employee_id} received={received} usable={usable_count} ready={embedding_ready} reload_pending={gallery_reload_pending}"
     );
 
     Ok(json!({
-        "received": files.len(),
-        "usable": usable,
+        "received": received,
+        "usable": usable_count,
         "rejected": rejected,
         "embedding_ready": embedding_ready,
-        "num_images_used": if embedding_ready { vectors.len() } else { 0 },
+        "num_images_used": if embedding_ready { usable_count } else { 0 },
+        "results": results,
+        "gallery_reload_pending": gallery_reload_pending,
     }))
 }
 
@@ -1658,5 +1971,394 @@ mod frame_scheduling_tests {
             }
         }
         assert_eq!(processed, 2);
+    }
+}
+
+#[cfg(test)]
+mod enroll_tests {
+    use super::*;
+    use image::{ImageBuffer, ImageFormat, Rgb};
+    use pksp_db::{connect_pool, create_employee, list_employee_images, Settings};
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    struct TempData {
+        dir: PathBuf,
+    }
+
+    impl Drop for TempData {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn temp_settings(min_enroll: usize) -> (TempData, Settings) {
+        let dir = std::env::temp_dir().join(format!("pksp-enroll-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("t.db");
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        let mut s = Settings::from_env();
+        s.database_url = format!("sqlite:////{abs}?mode=rwc");
+        s.data_dir = dir.clone();
+        s.min_enroll_images = min_enroll;
+        s.embedding_dim = 16;
+        s.min_face_px = 10;
+        s.min_det_score = 0.1;
+        s.max_enroll_files = 10;
+        s.max_enroll_file_bytes = 5_242_880;
+        s.max_enroll_upload_bytes = 33_554_432;
+        s.max_enroll_image_dim = 4096;
+        s.max_enroll_pixels = 20_000_000;
+        (TempData { dir }, s)
+    }
+
+    fn solid_png(w: u32, h: u32, v: u8) -> Vec<u8> {
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |_, _| Rgb([v, v, v]));
+        let mut buf = Vec::new();
+        img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    struct MultiFaceEngine {
+        dim: usize,
+    }
+
+    impl FaceEngine for MultiFaceEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "multi"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            width: u32,
+            height: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            let emb = vec![0.1; self.dim];
+            Ok(vec![
+                DetectedFace {
+                    bbox: (10.0, 10.0, 80.0, 80.0),
+                    det_score: 0.99,
+                    embedding: emb.clone(),
+                    landmarks: None,
+                },
+                DetectedFace {
+                    bbox: (
+                        width as f32 * 0.5,
+                        height as f32 * 0.5,
+                        width as f32 * 0.9,
+                        height as f32 * 0.9,
+                    ),
+                    det_score: 0.95,
+                    embedding: emb,
+                    landmarks: None,
+                },
+            ])
+        }
+    }
+
+    struct BoomEngine;
+
+    impl FaceEngine for BoomEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "boom"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            _w: u32,
+            _h: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            Err(FaceError::Model("tensor broken".into()))
+        }
+    }
+
+    #[test]
+    fn validate_rejects_over_dimension_and_corrupt() {
+        let (_t, s) = temp_settings(1);
+        let big = solid_png(100, 100, 200);
+        // tighten dim
+        let mut s2 = s.clone();
+        s2.max_enroll_image_dim = 50;
+        assert!(validate_enroll_image_bytes(&big, &s2).is_err());
+        assert!(validate_enroll_image_bytes(b"not-an-image", &s).is_err());
+        assert!(validate_enroll_image_bytes(&solid_png(64, 64, 180), &s).is_ok());
+    }
+
+    #[tokio::test]
+    async fn two_batches_are_cumulative() {
+        let (_t, settings) = temp_settings(1);
+        let pool = connect_pool(&settings).await.unwrap();
+        let eid = create_employee(&pool, "E1", "Alice", None).await.unwrap();
+        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        let gallery = Arc::new(RwLock::new(Gallery::empty(0.45, 0.08)));
+
+        let a = solid_png(80, 80, 120);
+        let r1 = enroll_images(
+            &pool,
+            &settings,
+            engine.clone(),
+            eid,
+            vec![("a.png".into(), a)],
+            Some(&gallery),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1["received"], 1);
+        assert_eq!(r1["usable"], 1);
+        assert_eq!(r1["embedding_ready"], true);
+        assert_eq!(r1["num_images_used"], 1);
+        assert_eq!(r1["gallery_reload_pending"], false);
+        assert!(r1["results"].as_array().unwrap().len() == 1);
+
+        let b = solid_png(80, 80, 130);
+        let r2 = enroll_images(
+            &pool,
+            &settings,
+            engine.clone(),
+            eid,
+            vec![("b.png".into(), b)],
+            Some(&gallery),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2["received"], 1);
+        assert_eq!(r2["usable"], 2, "mean must use A+B: {r2}");
+        assert_eq!(r2["num_images_used"], 2);
+        assert_eq!(r2["embedding_ready"], true);
+
+        let rows = list_employee_images(&pool, eid).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(gallery.read().unwrap().size(), 1);
+    }
+
+    #[tokio::test]
+    async fn recompute_preserves_ids_and_paths() {
+        let (_t, settings) = temp_settings(1);
+        let pool = connect_pool(&settings).await.unwrap();
+        let eid = create_employee(&pool, "E2", "Bob", None).await.unwrap();
+        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+
+        enroll_images(
+            &pool,
+            &settings,
+            engine.clone(),
+            eid,
+            vec![
+                ("x.png".into(), solid_png(80, 80, 140)),
+                ("y.png".into(), solid_png(80, 80, 150)),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        let before = list_employee_images(&pool, eid).await.unwrap();
+        assert_eq!(before.len(), 2);
+        let paths_before: Vec<_> = before.iter().map(|r| r.file_path.clone()).collect();
+        let ids_before: Vec<_> = before.iter().map(|r| r.id).collect();
+        let file_count_before = std::fs::read_dir(settings.enroll_dir().join(eid.to_string()))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+            .count();
+
+        let r = enroll_images(&pool, &settings, engine, eid, vec![], None)
+            .await
+            .unwrap();
+        assert_eq!(r["received"], 0);
+        assert_eq!(r["usable"], 2);
+
+        let after = list_employee_images(&pool, eid).await.unwrap();
+        assert_eq!(after.iter().map(|r| r.id).collect::<Vec<_>>(), ids_before);
+        assert_eq!(
+            after
+                .iter()
+                .map(|r| r.file_path.clone())
+                .collect::<Vec<_>>(),
+            paths_before
+        );
+        let file_count_after = std::fs::read_dir(settings.enroll_dir().join(eid.to_string()))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+            .count();
+        assert_eq!(file_count_before, file_count_after);
+        // No duplicate files
+        for p in &paths_before {
+            assert!(settings.data_dir.join(p).is_file());
+        }
+    }
+
+    #[tokio::test]
+    async fn below_minimum_deletes_embedding() {
+        let (_t, settings) = temp_settings(2);
+        let pool = connect_pool(&settings).await.unwrap();
+        let eid = create_employee(&pool, "E3", "Cara", None).await.unwrap();
+        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+
+        // One usable image → embedding_ready false, no row
+        let r = enroll_images(
+            &pool,
+            &settings,
+            engine.clone(),
+            eid,
+            vec![("only.png".into(), solid_png(80, 80, 160))],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["usable"], 1);
+        assert_eq!(r["embedding_ready"], false);
+        assert!(!pksp_db::embedding_exists(&pool, eid).await.unwrap());
+
+        // Reach minimum
+        enroll_images(
+            &pool,
+            &settings,
+            engine.clone(),
+            eid,
+            vec![("two.png".into(), solid_png(80, 80, 170))],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(pksp_db::embedding_exists(&pool, eid).await.unwrap());
+
+        // Replace analysis with dark (no face) by writing over files would be hard;
+        // instead recompute after manually marking — use dark image only upload path:
+        // upload a dark image and set min so that only dark new ones don't help.
+        // Delete usability by recompute with corrupt existing file:
+        let rows = list_employee_images(&pool, eid).await.unwrap();
+        for row in &rows {
+            let abs = settings.data_dir.join(&row.file_path);
+            std::fs::write(&abs, b"not-png-anymore").unwrap();
+        }
+        let r2 = enroll_images(&pool, &settings, engine, eid, vec![], None)
+            .await
+            .unwrap();
+        assert_eq!(r2["usable"], 0);
+        assert_eq!(r2["embedding_ready"], false);
+        assert!(!pksp_db::embedding_exists(&pool, eid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn systemic_model_error_preserves_prior_state() {
+        let (_t, settings) = temp_settings(1);
+        let pool = connect_pool(&settings).await.unwrap();
+        let eid = create_employee(&pool, "E4", "Dan", None).await.unwrap();
+        let ok_engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        enroll_images(
+            &pool,
+            &settings,
+            ok_engine,
+            eid,
+            vec![("keep.png".into(), solid_png(80, 80, 180))],
+            None,
+        )
+        .await
+        .unwrap();
+        let ver = pksp_db::gallery_version(&pool).await.unwrap();
+        let rows = list_employee_images(&pool, eid).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(pksp_db::embedding_exists(&pool, eid).await.unwrap());
+        let path = settings.data_dir.join(&rows[0].file_path);
+        assert!(path.is_file());
+        let file_bytes = std::fs::read(&path).unwrap();
+
+        let boom: Arc<dyn FaceEngine> = Arc::new(BoomEngine);
+        let err = enroll_images(
+            &pool,
+            &settings,
+            boom,
+            eid,
+            vec![("new.png".into(), solid_png(80, 80, 190))],
+            None,
+        )
+        .await;
+        assert!(err.is_err(), "systemic model error must abort");
+
+        let rows2 = list_employee_images(&pool, eid).await.unwrap();
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(rows2[0].id, rows[0].id);
+        assert_eq!(rows2[0].file_path, rows[0].file_path);
+        assert!(pksp_db::embedding_exists(&pool, eid).await.unwrap());
+        assert_eq!(pksp_db::gallery_version(&pool).await.unwrap(), ver);
+        assert_eq!(std::fs::read(&path).unwrap(), file_bytes);
+        // No leftover staging/new files
+        let enroll_dir = settings.enroll_dir().join(eid.to_string());
+        let names: Vec<_> = std::fs::read_dir(&enroll_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "only original file should remain: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n.contains("staging")));
+    }
+
+    #[tokio::test]
+    async fn ordinary_no_face_and_multi_face_recorded() {
+        let (_t, settings) = temp_settings(1);
+        let pool = connect_pool(&settings).await.unwrap();
+        let eid = create_employee(&pool, "E5", "Eve", None).await.unwrap();
+        let mock: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        // Dark image → no_face via mock
+        let r = enroll_images(
+            &pool,
+            &settings,
+            mock,
+            eid,
+            vec![("dark.png".into(), solid_png(80, 80, 0))],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["usable"], 0);
+        assert_eq!(r["results"][0]["usable"], false);
+        assert_eq!(r["results"][0]["reason"], "no_face");
+        assert_eq!(r["results"][0]["filename"], "dark.png");
+
+        let multi: Arc<dyn FaceEngine> = Arc::new(MultiFaceEngine {
+            dim: settings.embedding_dim,
+        });
+        let r2 = enroll_images(
+            &pool,
+            &settings,
+            multi,
+            eid,
+            vec![("m.png".into(), solid_png(100, 100, 200))],
+            None,
+        )
+        .await
+        .unwrap();
+        let last = r2["results"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["usable"], false);
+        assert_eq!(last["reason"], "multiple_faces");
+    }
+
+    #[test]
+    fn validate_rejects_over_pixels_and_file_bytes() {
+        let (_t, mut s) = temp_settings(1);
+        s.max_enroll_pixels = 100;
+        assert!(validate_enroll_image_bytes(&solid_png(20, 20, 100), &s).is_err());
+        s.max_enroll_pixels = 20_000_000;
+        s.max_enroll_file_bytes = 10;
+        assert!(validate_enroll_image_bytes(&solid_png(32, 32, 100), &s).is_err());
     }
 }

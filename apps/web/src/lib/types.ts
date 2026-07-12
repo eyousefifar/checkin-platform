@@ -54,6 +54,17 @@ export type Employee = {
   }[];
 };
 
+/** Additive enrollment upload / recompute result (frozen fields retained). */
+export type EnrollUploadResult = {
+  received: number;
+  usable: number;
+  rejected: { filename: string; reason: string }[];
+  embedding_ready: boolean;
+  num_images_used: number;
+  results?: { filename: string; usable: boolean; reason: string | null }[];
+  gallery_reload_pending?: boolean;
+};
+
 export type DailyRow = {
   employee_id: number;
   employee_code: string;

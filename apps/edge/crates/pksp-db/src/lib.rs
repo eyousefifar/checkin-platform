@@ -70,6 +70,16 @@ pub struct Settings {
     /// Empty or "ffmpeg" → auto-resolve apps/edge/bin/ffmpeg then PATH
     pub ffmpeg_bin: String,
     pub webrtc_base: String,
+    /// Total multipart body budget for enrollment uploads (bytes).
+    pub max_enroll_upload_bytes: usize,
+    /// Max files accepted in one enrollment upload.
+    pub max_enroll_files: usize,
+    /// Max decoded size of a single enrollment image (bytes).
+    pub max_enroll_file_bytes: usize,
+    /// Max width or height for an enrollment image.
+    pub max_enroll_image_dim: u32,
+    /// Max width*height pixels for an enrollment image.
+    pub max_enroll_pixels: u64,
 }
 
 impl Settings {
@@ -159,6 +169,19 @@ impl Settings {
             },
             ffmpeg_bin: env_or("FFMPEG_BIN", "ffmpeg"),
             webrtc_base: env_or("WEBRTC_BASE", "http://localhost:8889"),
+            max_enroll_upload_bytes: env_or("MAX_ENROLL_UPLOAD_BYTES", "33554432")
+                .parse()
+                .unwrap_or(33_554_432),
+            max_enroll_files: env_or("MAX_ENROLL_FILES", "10").parse().unwrap_or(10),
+            max_enroll_file_bytes: env_or("MAX_ENROLL_FILE_BYTES", "5242880")
+                .parse()
+                .unwrap_or(5_242_880),
+            max_enroll_image_dim: env_or("MAX_ENROLL_IMAGE_DIM", "4096")
+                .parse()
+                .unwrap_or(4096),
+            max_enroll_pixels: env_or("MAX_ENROLL_PIXELS", "20000000")
+                .parse()
+                .unwrap_or(20_000_000),
         }
     }
 
@@ -172,6 +195,7 @@ impl Settings {
 
     /// Fail closed before DB/media/worker startup when bind or secrets are unsafe.
     pub fn validate_startup(&self) -> Result<std::net::SocketAddr, String> {
+        self.validate_enrollment_limits()?;
         validate_bind_and_secrets(
             &self.bind_addr,
             &self.admin_password,
@@ -179,6 +203,26 @@ impl Settings {
             self.admin_password_from_env,
             self.jwt_secret_from_env,
         )
+    }
+
+    /// Reject nonsensical enrollment limit combinations at process start.
+    pub fn validate_enrollment_limits(&self) -> Result<(), String> {
+        if self.max_enroll_files == 0 {
+            return Err("MAX_ENROLL_FILES must be >= 1".into());
+        }
+        if self.max_enroll_file_bytes == 0 {
+            return Err("MAX_ENROLL_FILE_BYTES must be >= 1".into());
+        }
+        if self.max_enroll_upload_bytes < self.max_enroll_file_bytes {
+            return Err("MAX_ENROLL_UPLOAD_BYTES must be >= MAX_ENROLL_FILE_BYTES".into());
+        }
+        if self.max_enroll_image_dim == 0 {
+            return Err("MAX_ENROLL_IMAGE_DIM must be >= 1".into());
+        }
+        if self.max_enroll_pixels == 0 {
+            return Err("MAX_ENROLL_PIXELS must be >= 1".into());
+        }
+        Ok(())
     }
 }
 
@@ -823,6 +867,20 @@ pub async fn save_embedding(
     num_used: i32,
     model_name: &str,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    save_embedding_tx(&mut tx, employee_id, vector, dim, num_used, model_name).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn save_embedding_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    employee_id: i64,
+    vector: &[u8],
+    dim: usize,
+    num_used: i32,
+    model_name: &str,
+) -> Result<()> {
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     sqlx::query(
         "INSERT INTO employee_embeddings(employee_id, dim, vector, num_images_used, model_name, updated_at)
@@ -837,13 +895,74 @@ pub async fn save_embedding(
     .bind(num_used)
     .bind(model_name)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
 
+pub async fn delete_embedding(pool: &SqlitePool, employee_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM employee_embeddings WHERE employee_id=?")
+        .bind(employee_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_embedding_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    employee_id: i64,
+) -> Result<()> {
+    sqlx::query("DELETE FROM employee_embeddings WHERE employee_id=?")
+        .bind(employee_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct EmployeeImageRow {
+    pub id: i64,
+    pub file_path: String,
+    pub usable: bool,
+    pub reject_reason: Option<String>,
+}
+
+pub async fn list_employee_images(
+    pool: &SqlitePool,
+    employee_id: i64,
+) -> Result<Vec<EmployeeImageRow>> {
+    let rows = sqlx::query(
+        "SELECT id, file_path, usable, reject_reason FROM employee_images WHERE employee_id=? ORDER BY id",
+    )
+    .bind(employee_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| EmployeeImageRow {
+            id: r.get("id"),
+            file_path: r.get("file_path"),
+            usable: r.get::<i64, _>("usable") != 0,
+            reject_reason: r.get("reject_reason"),
+        })
+        .collect())
+}
+
 pub async fn add_employee_image(
     pool: &SqlitePool,
+    employee_id: i64,
+    file_path: &str,
+    usable: bool,
+    reject_reason: Option<&str>,
+) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    let id = add_employee_image_tx(&mut tx, employee_id, file_path, usable, reject_reason).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn add_employee_image_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     employee_id: i64,
     file_path: &str,
     usable: bool,
@@ -859,9 +978,48 @@ pub async fn add_employee_image(
     .bind(if usable { 1 } else { 0 })
     .bind(reject_reason)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(res.last_insert_rowid())
+}
+
+pub async fn update_employee_image_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: i64,
+    usable: bool,
+    reject_reason: Option<&str>,
+) -> Result<()> {
+    sqlx::query("UPDATE employee_images SET usable=?, reject_reason=? WHERE id=?")
+        .bind(if usable { 1 } else { 0 })
+        .bind(reject_reason)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn bump_gallery_version_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<u64> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM app_meta WHERE key = 'gallery_version'")
+            .fetch_optional(&mut **tx)
+            .await?;
+    let v = row.and_then(|(v,)| v.parse::<u64>().ok()).unwrap_or(0) + 1;
+    sqlx::query(
+        "INSERT INTO app_meta(key, value) VALUES('gallery_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(v.to_string())
+    .execute(&mut **tx)
+    .await?;
+    Ok(v)
+}
+
+pub async fn embedding_exists(pool: &SqlitePool, employee_id: i64) -> Result<bool> {
+    let row = sqlx::query("SELECT 1 as x FROM employee_embeddings WHERE employee_id=?")
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
 }
 
 #[cfg(test)]
@@ -961,5 +1119,36 @@ mod security_settings_tests {
         let err = validate_bind_and_secrets("not-an-addr", "x", &"y".repeat(32), true, true)
             .expect_err("malformed");
         assert!(err.contains("BIND_ADDR"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod enrollment_settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn enrollment_limits_reject_zero_files() {
+        let mut s = Settings::from_env();
+        s.max_enroll_files = 0;
+        let err = s.validate_enrollment_limits().expect_err("zero files");
+        assert!(err.contains("MAX_ENROLL_FILES"), "{err}");
+    }
+
+    #[test]
+    fn enrollment_limits_reject_upload_lt_file() {
+        let mut s = Settings::from_env();
+        s.max_enroll_file_bytes = 1000;
+        s.max_enroll_upload_bytes = 100;
+        let err = s.validate_enrollment_limits().expect_err("upload < file");
+        assert!(err.contains("MAX_ENROLL_UPLOAD_BYTES"), "{err}");
+    }
+
+    #[test]
+    fn enrollment_limits_defaults_ok() {
+        let s = Settings::from_env();
+        s.validate_enrollment_limits().expect("defaults");
+        assert_eq!(s.max_enroll_files, 10);
+        assert_eq!(s.max_enroll_file_bytes, 5_242_880);
+        assert_eq!(s.max_enroll_upload_bytes, 33_554_432);
     }
 }
