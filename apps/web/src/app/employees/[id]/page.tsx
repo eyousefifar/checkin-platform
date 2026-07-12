@@ -6,6 +6,12 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import type { Employee, EnrollmentResult } from "@/lib/types";
 
+export type EmployeeUpdateBody = {
+  full_name: string;
+  department: string | null;
+  is_active: boolean;
+};
+
 export default function EmployeeDetailPage() {
   const params = useParams();
   const id = Number(params.id);
@@ -19,10 +25,18 @@ export default function EmployeeDetailPage() {
   const [files, setFiles] = useState<FileList | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Edit form — reinitialized whenever server-confirmed employee changes.
+  const [fullName, setFullName] = useState("");
+  const [department, setDepartment] = useState("");
+  const [isActive, setIsActive] = useState(true);
+
   const load = useCallback(async () => {
     try {
       const data = await api<Employee>(`/api/employees/${id}`);
       setEmp(data);
+      setFullName(data.full_name);
+      setDepartment(data.department ?? "");
+      setIsActive(data.is_active);
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
@@ -32,6 +46,54 @@ export default function EmployeeDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Keep form in sync if emp is replaced by a successful PATCH without load().
+  useEffect(() => {
+    if (!emp) return;
+    setFullName(emp.full_name);
+    setDepartment(emp.department ?? "");
+    setIsActive(emp.is_active);
+  }, [emp]);
+
+  async function saveProfile(e: FormEvent) {
+    e.preventDefault();
+    if (!emp || busy) return;
+
+    const nextActive = isActive;
+    const wasActive = emp.is_active;
+    if (wasActive && !nextActive) {
+      const ok = window.confirm(
+        "Deactivate this employee? Recognition will stop matching them, but attendance records and enrollment images remain. You can reactivate later.",
+      );
+      if (!ok) {
+        // Restore the active control to the last server-confirmed value.
+        setIsActive(true);
+        return;
+      }
+    }
+
+    setBusy(true);
+    setError("");
+    setStatusMsg("");
+    const body: EmployeeUpdateBody = {
+      full_name: fullName.trim(),
+      department: department.trim() === "" ? null : department.trim(),
+      is_active: nextActive,
+    };
+    try {
+      const updated = await api<Employee>(`/api/employees/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setEmp(updated);
+      setStatusMsg("Employee profile saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+      // Retain last server-confirmed emp and the user's form values for retry.
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function upload(e: FormEvent) {
     e.preventDefault();
@@ -125,11 +187,101 @@ export default function EmployeeDetailPage() {
             {emp.full_name}
           </h1>
           <p className="mt-1 font-mono text-sm text-body">
-            {emp.employee_code} · {emp.department || "no dept"} · embedding{" "}
+            <span data-testid="employee-code-display">{emp.employee_code}</span>
+            {" · "}
+            {emp.department || "no dept"} · embedding{" "}
             <span className={emp.embedding_ready ? "text-success" : "text-warning"}>
               {emp.embedding_ready ? "ready" : "missing"}
             </span>
+            {" · "}
+            <span data-testid="employee-active-display">
+              {emp.is_active ? "active" : "inactive"}
+            </span>
           </p>
+
+          <form
+            onSubmit={saveProfile}
+            className="mt-6 space-y-3 border border-hairline bg-card p-4"
+            data-testid="profile-form"
+          >
+            <h2 className="text-[11px] font-bold uppercase tracking-label text-muted">
+              Profile
+            </h2>
+            <div>
+              <label
+                htmlFor="employee-code"
+                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+              >
+                Employee code
+              </label>
+              <input
+                id="employee-code"
+                type="text"
+                value={emp.employee_code}
+                readOnly
+                disabled
+                className="mt-1 w-full border border-hairline bg-soft px-3 py-2 font-mono text-sm text-muted"
+                data-testid="employee-code-readonly"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="full-name"
+                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+              >
+                Full name
+              </label>
+              <input
+                id="full-name"
+                type="text"
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                disabled={busy}
+                required
+                className="mt-1 w-full border border-hairline bg-elevated px-3 py-2 text-sm text-ink"
+                data-testid="edit-full-name"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="department"
+                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+              >
+                Department
+              </label>
+              <input
+                id="department"
+                type="text"
+                value={department}
+                onChange={(e) => setDepartment(e.target.value)}
+                disabled={busy}
+                className="mt-1 w-full border border-hairline bg-elevated px-3 py-2 text-sm text-ink"
+                data-testid="edit-department"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                id="is-active"
+                type="checkbox"
+                checked={isActive}
+                onChange={(e) => setIsActive(e.target.checked)}
+                disabled={busy}
+                className="h-4 w-4"
+                data-testid="edit-is-active"
+              />
+              <label htmlFor="is-active" className="text-sm text-body">
+                Active (recognition enabled)
+              </label>
+            </div>
+            <button
+              type="submit"
+              disabled={busy}
+              className="border border-ink px-4 py-2 text-xs font-bold uppercase tracking-label hover:bg-elevated disabled:opacity-50"
+              data-testid="save-profile"
+            >
+              Save profile
+            </button>
+          </form>
 
           <div className="mt-6 border border-hairline bg-card p-4">
             <h2 className="text-[11px] font-bold uppercase tracking-label text-muted">

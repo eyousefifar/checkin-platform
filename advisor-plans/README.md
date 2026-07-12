@@ -30,7 +30,7 @@ open a pull request unless the operator explicitly asks.
 | 015 | Remove low-cost frontend and employee-list hot spots | P2 | S | 001 | DONE |
 | 016 | Render the one-or-two-camera wall from health | P2 | M | 007, 008, 013 | DONE |
 | 017 | Add attendance explainability before analytics | P2 | M | 009, 011, 016 | DONE |
-| 018 | Add employee editing and reversible deactivation | P2 | S | 010, 012 | TODO |
+| 018 | Add employee editing and reversible deactivation | P2 | S | 010, 012 | DONE |
 | 019 | Upgrade MediaMTX behind the stream regression gate | P2 | M | 007, 013 | TODO |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED — <reason>`, or
