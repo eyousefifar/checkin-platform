@@ -190,8 +190,30 @@ impl OrtFaceEngine {
     }
 }
 
+/// Map a requested ONNX provider list to the provider actually applied.
+///
+/// CPU-first MVP: only `CPUExecutionProvider` is registered. Unsupported labels
+/// fall back to CPU and are reported as such (never claim a requested EP we did
+/// not enable).
+pub fn applied_execution_provider(requested: &str) -> String {
+    let first = requested
+        .split(',')
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or("CPUExecutionProvider");
+    if first == "CPUExecutionProvider" {
+        "CPUExecutionProvider".into()
+    } else {
+        warn!(
+            requested = first,
+            "ONNX provider not registered; using CPUExecutionProvider"
+        );
+        "CPUExecutionProvider".into()
+    }
+}
+
 /// Attempt to validate model paths / init. Full SCRFD+ArcFace runs when ort sessions exist.
-/// Returns provider name on success.
+/// Returns the *applied* provider name on success.
 fn try_init_ort(
     model_dir: &std::path::Path,
     _det_size: i32,
@@ -205,11 +227,7 @@ fn try_init_ort(
     // ort sessions are initialized lazily on first detect when feature available.
     // Without the ort crate linked, we report unavailable so MOCK remains safe.
     if std::env::var("PKSP_FORCE_ORT_READY").as_deref() == Ok("1") {
-        return Ok(providers
-            .split(',')
-            .next()
-            .unwrap_or("CPUExecutionProvider")
-            .to_string());
+        return Ok(applied_execution_provider(providers));
     }
     // Real ort path: implemented in engine_ort module when dependency present.
     ort_runtime::try_load(model_dir, providers)
@@ -270,12 +288,8 @@ mod ort_sessions {
     pub fn load(model_dir: &Path, providers: &str) -> Result<String, String> {
         let det_path = model_dir.join("det_10g.onnx");
         let rec_path = model_dir.join("w600k_r50.onnx");
-        let provider = providers
-            .split(',')
-            .map(|s| s.trim())
-            .find(|s| !s.is_empty())
-            .unwrap_or("CPUExecutionProvider")
-            .to_string();
+        // Sessions use the default CPU EP; report only what is actually applied.
+        let provider = super::applied_execution_provider(providers);
 
         let det = ort::session::Session::builder()
             .map_err(|e| e.to_string())?
@@ -592,8 +606,24 @@ pub fn start_mock_worker(
     )
 }
 
-// Shared latest BGR frame: (width, height, pixels, captured_at)
-type LatestFrame = Arc<RwLock<Option<(u32, u32, Vec<u8>, Instant)>>>;
+/// Latest captured frame — one slot only (drop-old policy). Sequence identifies observations.
+#[derive(Clone)]
+struct CapturedFrame {
+    width: u32,
+    height: u32,
+    bgr: Vec<u8>,
+    captured_at: Instant,
+    sequence: u64,
+}
+
+type LatestFrame = Arc<RwLock<Option<CapturedFrame>>>;
+
+/// True when this capture sequence has not yet been inferred.
+/// Equality means the same observation (including after `wrapping_add` wrap).
+#[inline]
+fn should_infer_sequence(last_processed: Option<u64>, sequence: u64) -> bool {
+    last_processed != Some(sequence)
+}
 
 #[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 async fn process_loop(
@@ -618,6 +648,9 @@ async fn process_loop(
     // Seed overwritten on first frame; elapsed used for freeze/offline detection.
     #[allow(unused_assignments)]
     let mut last_frame_ts = Instant::now();
+    let mut last_processed_sequence: Option<u64> = None;
+    let mut synthetic_sequence: u64 = 0;
+    let mut last_infer_err_log = Instant::now() - Duration::from_secs(60);
     let use_rtsp = !settings.mock_vision && !rtsp_url.is_empty() && engine.ready();
 
     // Shared latest frame for RTSP path
@@ -658,12 +691,12 @@ async fn process_loop(
             }
         }
 
-        let (w, h, bgr) = if use_rtsp {
+        let (w, h, bgr, sequence) = if use_rtsp {
             let snap = latest.read().unwrap().clone();
             match snap {
-                Some((w, h, bgr, ts)) => {
-                    last_frame_ts = ts;
-                    let age = ts.elapsed().as_millis() as u64;
+                Some(frame) => {
+                    last_frame_ts = frame.captured_at;
+                    let age = frame.captured_at.elapsed().as_millis() as u64;
                     let online = age < 2000;
                     metrics
                         .write()
@@ -679,7 +712,19 @@ async fn process_loop(
                         }));
                         continue;
                     }
-                    (w, h, bgr)
+                    // Fresh-but-unchanged frame: publish status only; no detect/vote.
+                    if !should_infer_sequence(last_processed_sequence, frame.sequence) {
+                        let _ = tx.send(json!({
+                            "type": "camera_status",
+                            "camera_id": camera_id,
+                            "online": true,
+                            "last_frame_age_ms": age,
+                        }));
+                        continue;
+                    }
+                    // Own the snapshot before marking processed.
+                    last_processed_sequence = Some(frame.sequence);
+                    (frame.width, frame.height, frame.bgr, frame.sequence)
                 }
                 None => {
                     metrics
@@ -691,7 +736,7 @@ async fn process_loop(
                 }
             }
         } else {
-            // Synthetic BGR frame
+            // Synthetic BGR frame — each tick is a new observation.
             let w = 320u32;
             let h = 320u32;
             let phase = SystemTime::now()
@@ -708,23 +753,60 @@ async fn process_loop(
                     bgr[i + 2] = intensity.saturating_add(5);
                 }
             }
+            synthetic_sequence = synthetic_sequence.wrapping_add(1);
             last_frame_ts = Instant::now();
             metrics
                 .write()
                 .unwrap()
                 .online
                 .insert(camera_id.clone(), true);
-            (w, h, bgr)
+            last_processed_sequence = Some(synthetic_sequence);
+            (w, h, bgr, synthetic_sequence)
         };
+        let _ = sequence;
 
         let infer_t0 = Instant::now();
-        let _permit = infer_sem.acquire().await.ok();
-        let faces_out = infer_frame(
+        let permit = match infer_sem.acquire().await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Synchronous ORT off the async runtime; keep BGR for quality gates.
+        let (bgr, raw) = match detect_faces_blocking(engine.clone(), w, h, bgr).await {
+            Ok((pixels, Ok(faces))) => (pixels, faces),
+            Ok((_pixels, Err(e))) => {
+                // Structural model errors stay typed — never empty-face success.
+                if last_infer_err_log.elapsed() >= Duration::from_secs(5) {
+                    warn!(
+                        camera_id = %camera_id,
+                        error = %e,
+                        "detect_and_embed failed"
+                    );
+                    last_infer_err_log = Instant::now();
+                }
+                drop(permit);
+                continue;
+            }
+            Err(join_err) => {
+                if last_infer_err_log.elapsed() >= Duration::from_secs(5) {
+                    warn!(
+                        camera_id = %camera_id,
+                        error = %join_err,
+                        "detect_and_embed join failed"
+                    );
+                    last_infer_err_log = Instant::now();
+                }
+                drop(permit);
+                continue;
+            }
+        };
+
+        let faces_out = process_detected_faces(
             &camera_id,
             w,
             h,
             &bgr,
-            &engine,
+            raw,
             &gallery,
             &mut tracker,
             &settings,
@@ -734,7 +816,7 @@ async fn process_loop(
             &metrics,
         )
         .await;
-        drop(_permit);
+        drop(permit);
         let infer_ms = infer_t0.elapsed().as_secs_f64() * 1000.0;
 
         if settings.vision_adaptive {
@@ -766,6 +848,7 @@ async fn process_loop(
             "last_frame_age_ms": age_ms,
         }));
 
+        // Only successful inference passes count toward processed FPS.
         frames += 1;
         if fps_t0.elapsed() >= Duration::from_secs(2) {
             let fps = frames as f64 / fps_t0.elapsed().as_secs_f64();
@@ -799,6 +882,7 @@ fn capture_ffmpeg_loop(
     let w = 640u32;
     let h = 360u32;
     let frame_size = (w * h * 3) as usize;
+    let mut sequence: u64 = 0;
     while !stop.load(Ordering::SeqCst) {
         let bin = resolve_ffmpeg(ffmpeg_bin);
         info!(camera_id, bin = %bin, "starting ffmpeg RTSP capture");
@@ -847,7 +931,14 @@ fn capture_ffmpeg_loop(
             }
             match stdout.read_exact(&mut buf) {
                 Ok(()) => {
-                    *latest.write().unwrap() = Some((w, h, buf.clone(), Instant::now()));
+                    sequence = sequence.wrapping_add(1);
+                    *latest.write().unwrap() = Some(CapturedFrame {
+                        width: w,
+                        height: h,
+                        bgr: buf.clone(),
+                        captured_at: Instant::now(),
+                        sequence,
+                    });
                 }
                 Err(_) => {
                     warn!(camera_id, "ffmpeg pipe ended; reconnecting");
@@ -881,13 +972,14 @@ fn bundled_bin_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// Run quality/match/track/DB/broadcast for faces already detected off-thread.
 #[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
-async fn infer_frame(
+async fn process_detected_faces(
     camera_id: &str,
     w: u32,
     h: u32,
     bgr: &[u8],
-    engine: &Arc<dyn FaceEngine>,
+    raw: Vec<DetectedFace>,
     gallery: &Arc<RwLock<Gallery>>,
     tracker: &mut TrackerState,
     settings: &Settings,
@@ -896,19 +988,6 @@ async fn infer_frame(
     tx: &broadcast::Sender<WsEvent>,
     metrics: &Arc<RwLock<VisionMetrics>>,
 ) -> Vec<serde_json::Value> {
-    let raw = if engine.ready() {
-        match engine.detect_and_embed(w, h, bgr) {
-            Ok(v) => v,
-            Err(e) => {
-                // Structural model errors: log sanitized message; do not treat as empty success.
-                warn!(camera_id = %camera_id, error = %e, "detect_and_embed failed");
-                vec![]
-            }
-        }
-    } else {
-        vec![]
-    };
-
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -1253,4 +1332,331 @@ pub async fn enroll_images(
         "embedding_ready": embedding_ready,
         "num_images_used": if embedding_ready { vectors.len() } else { 0 },
     }))
+}
+
+/// Run engine detection on a blocking thread pool worker; preserve BGR ownership.
+async fn detect_faces_blocking(
+    engine: Arc<dyn FaceEngine>,
+    width: u32,
+    height: u32,
+    bgr: Vec<u8>,
+) -> Result<(Vec<u8>, Result<Vec<DetectedFace>, FaceError>), FaceError> {
+    tokio::task::spawn_blocking(move || {
+        let result = if engine.ready() {
+            engine.detect_and_embed(width, height, &bgr)
+        } else {
+            Ok(vec![])
+        };
+        (bgr, result)
+    })
+    .await
+    .map_err(|e| FaceError::Model(format!("inference join failed: {e}")))
+}
+
+#[cfg(test)]
+mod frame_scheduling_tests {
+    use super::*;
+    use pksp_core::{assign_tracks, Detection, TrackerState};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct CountingEngine {
+        calls: AtomicUsize,
+        dim: usize,
+    }
+
+    impl CountingEngine {
+        fn new(dim: usize) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                dim,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl FaceEngine for CountingEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "counting"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            width: u32,
+            height: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            let x1 = width as f32 * 0.2;
+            let y1 = height as f32 * 0.2;
+            let x2 = width as f32 * 0.8;
+            let y2 = height as f32 * 0.8;
+            Ok(vec![DetectedFace {
+                bbox: (x1, y1, x2, y2),
+                det_score: 0.99,
+                embedding: vec![0.0; self.dim],
+                landmarks: None,
+            }])
+        }
+    }
+
+    struct SleepyEngine {
+        delay: Duration,
+    }
+
+    impl FaceEngine for SleepyEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "sleepy"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            _w: u32,
+            _h: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            std::thread::sleep(self.delay);
+            Ok(vec![])
+        }
+    }
+
+    struct PanicEngine;
+
+    impl FaceEngine for PanicEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "panic"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            _w: u32,
+            _h: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            panic!("deliberate inference panic");
+        }
+    }
+
+    struct FailingEngine;
+
+    impl FaceEngine for FailingEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "fail"
+        }
+        fn execution_provider(&self) -> &str {
+            "mock"
+        }
+        fn detect_and_embed(
+            &self,
+            _w: u32,
+            _h: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            Err(FaceError::Model("session broken".into()))
+        }
+    }
+
+    /// Simulate process_loop ticks over a fixed latest-frame slot (no queue).
+    fn simulate_ticks(
+        engine: &CountingEngine,
+        sequences: &[u64],
+        tracker: &mut TrackerState,
+    ) -> (usize, usize) {
+        let mut last_processed: Option<u64> = None;
+        let mut processed = 0usize;
+        let mut votes_appended = 0usize;
+        for &seq in sequences {
+            if !should_infer_sequence(last_processed, seq) {
+                continue;
+            }
+            last_processed = Some(seq);
+            let w = 100u32;
+            let h = 100u32;
+            let bgr = vec![128u8; (w * h * 3) as usize];
+            let faces = engine.detect_and_embed(w, h, &bgr).expect("detect");
+            processed += 1;
+            let before: usize = tracker.tracks.iter().map(|t| t.history.len()).sum();
+            let dets: Vec<Detection> = faces
+                .iter()
+                .map(|f| Detection {
+                    bbox: (
+                        f.bbox.0 / w as f32,
+                        f.bbox.1 / h as f32,
+                        f.bbox.2 / w as f32,
+                        f.bbox.3 / h as f32,
+                    ),
+                    employee_id: Some(1),
+                    score: 0.9,
+                    label: "T".into(),
+                    quality_ok: true,
+                    ts: 0.0,
+                    state: "matched".into(),
+                })
+                .collect();
+            let _tracks = assign_tracks(tracker, &dets, 0.3, 10, 5);
+            let after: usize = tracker.tracks.iter().map(|t| t.history.len()).sum();
+            votes_appended += after.saturating_sub(before);
+        }
+        (processed, votes_appended)
+    }
+
+    #[test]
+    fn duplicate_sequence_infers_once_and_one_vote() {
+        let engine = CountingEngine::new(8);
+        let mut tracker = TrackerState::new();
+        // Three polls of sequence 1, then a new sequence 2.
+        let (processed, votes) = simulate_ticks(&engine, &[1, 1, 1, 2], &mut tracker);
+        assert_eq!(
+            engine.calls(),
+            2,
+            "engine must run once per unique sequence"
+        );
+        assert_eq!(processed, 2);
+        // One vote per processed sequence (not per poll).
+        assert_eq!(votes, 2, "at most one vote per processed sequence");
+    }
+
+    #[test]
+    fn wrapping_sequence_equality_is_not_new() {
+        assert!(!should_infer_sequence(Some(u64::MAX), u64::MAX));
+        assert!(should_infer_sequence(Some(u64::MAX), 0));
+        assert!(should_infer_sequence(None, 0));
+    }
+
+    #[test]
+    fn applied_provider_reports_cpu_for_unsupported() {
+        assert_eq!(
+            applied_execution_provider("CPUExecutionProvider"),
+            "CPUExecutionProvider"
+        );
+        assert_eq!(
+            applied_execution_provider("OpenVINOExecutionProvider,CPUExecutionProvider"),
+            "CPUExecutionProvider"
+        );
+        assert_eq!(
+            applied_execution_provider("CUDAExecutionProvider"),
+            "CPUExecutionProvider"
+        );
+        assert_eq!(applied_execution_provider(""), "CPUExecutionProvider");
+    }
+
+    #[tokio::test]
+    async fn blocking_detect_allows_timer_to_advance() {
+        let engine: Arc<dyn FaceEngine> = Arc::new(SleepyEngine {
+            delay: Duration::from_millis(200),
+        });
+        let bgr = vec![40u8; 64 * 64 * 3];
+        let start = Instant::now();
+        let handle = tokio::spawn(detect_faces_blocking(engine, 64, 64, bgr));
+        // Independent future must complete while inference still sleeps.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "tokio timer stalled by blocking inference"
+        );
+        let out = handle.await.expect("join spawn");
+        assert!(out.is_ok());
+        assert!(start.elapsed() >= Duration::from_millis(180));
+    }
+
+    #[tokio::test]
+    async fn panic_in_blocking_detect_is_join_error() {
+        let engine: Arc<dyn FaceEngine> = Arc::new(PanicEngine);
+        let bgr = vec![40u8; 32 * 32 * 3];
+        let err = detect_faces_blocking(engine, 32, 32, bgr)
+            .await
+            .expect_err("panic must surface as FaceError");
+        match err {
+            FaceError::Model(msg) => assert!(msg.contains("join"), "{msg}"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_model_failure_is_not_empty_success() {
+        let engine: Arc<dyn FaceEngine> = Arc::new(FailingEngine);
+        let bgr = vec![40u8; 32 * 32 * 3];
+        let (pixels, result) = detect_faces_blocking(engine, 32, 32, bgr)
+            .await
+            .expect("join ok");
+        assert_eq!(pixels.len(), 32 * 32 * 3);
+        match result {
+            Err(FaceError::Model(msg)) => assert!(msg.contains("session"), "{msg}"),
+            Ok(v) => panic!("must not translate model failure to Ok({} faces)", v.len()),
+            Err(other) => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn latest_frame_slot_replaces_not_queues() {
+        let latest: LatestFrame = Arc::new(RwLock::new(None));
+        {
+            let mut g = latest.write().unwrap();
+            *g = Some(CapturedFrame {
+                width: 10,
+                height: 10,
+                bgr: vec![1; 300],
+                captured_at: Instant::now(),
+                sequence: 1,
+            });
+            *g = Some(CapturedFrame {
+                width: 10,
+                height: 10,
+                bgr: vec![2; 300],
+                captured_at: Instant::now(),
+                sequence: 2,
+            });
+        }
+        let snap = latest.read().unwrap().clone().unwrap();
+        assert_eq!(snap.sequence, 2);
+        assert_eq!(snap.bgr[0], 2);
+    }
+
+    /// Semaphore is released even when detection panics (via join error path).
+    #[tokio::test]
+    async fn semaphore_released_after_join_failure() {
+        let sem = Arc::new(Semaphore::new(1));
+        let engine: Arc<dyn FaceEngine> = Arc::new(PanicEngine);
+        let bgr = vec![1u8; 16 * 16 * 3];
+        {
+            let _permit = sem.acquire().await.unwrap();
+            let _ = detect_faces_blocking(engine, 16, 16, bgr).await;
+            // permit drops here
+        }
+        // Must be acquirable immediately — no deadlock.
+        let got = tokio::time::timeout(Duration::from_millis(100), sem.acquire()).await;
+        assert!(got.is_ok(), "semaphore not released after join failure");
+    }
+
+    #[test]
+    fn duplicate_polls_do_not_inflate_processed_count() {
+        let mut last: Option<u64> = None;
+        let mut processed = 0u32;
+        for seq in [7u64, 7, 7, 8, 8] {
+            if should_infer_sequence(last, seq) {
+                last = Some(seq);
+                processed += 1;
+            }
+        }
+        assert_eq!(processed, 2);
+    }
 }

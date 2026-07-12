@@ -17,7 +17,7 @@ open a pull request unless the operator explicitly asks.
 | 002 | Make Rust formatting and Clippy gates green | P2 | S | 001 | DONE |
 | 003 | Contain credentials, JWTs, and biometric files | P0 | M | 001 | DONE |
 | 004 | Replace heuristic face inference with SCRFD and ArcFace | P0 | L | 001, 002 | DONE |
-| 005 | Process each frame once and isolate blocking inference | P0 | M | 001, 004 | TODO |
+| 005 | Process each frame once and isolate blocking inference | P0 | M | 001, 004 | DONE |
 | 006 | Make enrollment cumulative, bounded, and recoverable | P0 | M | 001, 004, 005 | TODO |
 | 007 | Wire and verify one browser-safe MediaMTX path | P0 | M | 001, 003 | TODO |
 | 008 | Keep WebSocket delivery and camera state live | P1 | M | 001, 005 | TODO |
