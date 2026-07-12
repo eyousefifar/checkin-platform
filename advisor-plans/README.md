@@ -31,7 +31,7 @@ open a pull request unless the operator explicitly asks.
 | 016 | Render the one-or-two-camera wall from health | P2 | M | 007, 008, 013 | DONE |
 | 017 | Add attendance explainability before analytics | P2 | M | 009, 011, 016 | DONE |
 | 018 | Add employee editing and reversible deactivation | P2 | S | 010, 012 | DONE |
-| 019 | Upgrade MediaMTX behind the stream regression gate | P2 | M | 007, 013 | TODO |
+| 019 | Upgrade MediaMTX behind the stream regression gate | P2 | M | 007, 013 | REJECTED — deferred: keep proven v1.11.3 pin from plan 007; eight-minor jump to v1.19.2 needs dedicated free-port WHEP/container dress rehearsal |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED — <reason>`, or
 `REJECTED — <reason>`.
