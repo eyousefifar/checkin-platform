@@ -593,12 +593,15 @@ pub async fn list_employees(pool: &SqlitePool, q: Option<&str>) -> Result<Vec<se
     let mut images_by_emp: HashMap<i64, Vec<serde_json::Value>> = HashMap::new();
     for i in image_rows {
         let emp_id: i64 = i.get("employee_id");
-        images_by_emp.entry(emp_id).or_default().push(serde_json::json!({
-            "id": i.get::<i64,_>("id"),
-            "file_path": i.get::<String,_>("file_path"),
-            "usable": i.get::<i64,_>("usable") != 0,
-            "reject_reason": i.get::<Option<String>,_>("reject_reason"),
-        }));
+        images_by_emp
+            .entry(emp_id)
+            .or_default()
+            .push(serde_json::json!({
+                "id": i.get::<i64,_>("id"),
+                "file_path": i.get::<String,_>("file_path"),
+                "usable": i.get::<i64,_>("usable") != 0,
+                "reject_reason": i.get::<Option<String>,_>("reject_reason"),
+            }));
     }
 
     let mut emb_by_emp: HashMap<i64, i64> = HashMap::new();
@@ -609,7 +612,10 @@ pub async fn list_employees(pool: &SqlitePool, q: Option<&str>) -> Result<Vec<se
     let mut out = Vec::with_capacity(selected.len());
     for (id, code, name, department, is_active) in selected {
         let imgs = images_by_emp.remove(&id).unwrap_or_default();
-        let usable = imgs.iter().filter(|i| i["usable"].as_bool() == Some(true)).count();
+        let usable = imgs
+            .iter()
+            .filter(|i| i["usable"].as_bool() == Some(true))
+            .count();
         let emb = emb_by_emp.get(&id);
         out.push(serde_json::json!({
             "id": id,
