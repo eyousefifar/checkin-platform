@@ -793,7 +793,7 @@ pub async fn commit_identity(
     }
     let name: String = emp.get("full_name");
     let now = Utc::now();
-    let local_date = local_date_str(now, app_timezone);
+    let local_date = local_date_str(now, app_timezone)?;
     let last_today = last_event_today(pool, employee_id, &local_date).await?;
     let last_cam = last_camera_event_ts(pool, employee_id, camera_id).await?;
     let decision = on_identity_commit(
@@ -828,11 +828,38 @@ pub async fn commit_identity(
     )))
 }
 
-fn local_date_str(now: chrono::DateTime<Utc>, tz_name: &str) -> String {
-    if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
-        return now.with_timezone(&tz).date_naive().to_string();
+/// Local calendar date (`YYYY-MM-DD`) for `now` in the named IANA timezone.
+///
+/// A valid IANA name returns its local calendar date. An invalid name returns an
+/// error and never falls back to UTC — callers must treat misconfiguration as
+/// fail-closed.
+pub fn local_date_str(now: chrono::DateTime<Utc>, tz_name: &str) -> Result<String> {
+    let tz = tz_name.parse::<chrono_tz::Tz>().map_err(|_| {
+        anyhow::anyhow!("invalid APP_TIMEZONE {tz_name:?}; expected a valid IANA timezone name")
+    })?;
+    Ok(now.with_timezone(&tz).date_naive().to_string())
+}
+
+/// Convert a UTC ISO wire timestamp (`YYYY-MM-DDTHH:MM:SSZ` or with fractional
+/// seconds) into a local wall-clock `HH:MM:SS` in the named IANA zone.
+///
+/// Empty input yields an empty string. Invalid timestamps or timezones error.
+pub fn utc_iso_to_local_hms(iso_utc: &str, tz_name: &str) -> Result<String> {
+    if iso_utc.is_empty() {
+        return Ok(String::new());
     }
-    now.date_naive().to_string()
+    let tz = tz_name.parse::<chrono_tz::Tz>().map_err(|_| {
+        anyhow::anyhow!("invalid APP_TIMEZONE {tz_name:?}; expected a valid IANA timezone name")
+    })?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(iso_utc)
+        .or_else(|_| {
+            // Wire contract uses trailing Z without offset form.
+            chrono::DateTime::parse_from_str(iso_utc, "%Y-%m-%dT%H:%M:%SZ")
+        })
+        .or_else(|_| chrono::DateTime::parse_from_str(iso_utc, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .map_err(|_| anyhow::anyhow!("invalid UTC ISO timestamp {iso_utc:?}"))?;
+    let utc = parsed.with_timezone(&Utc);
+    Ok(utc.with_timezone(&tz).format("%H:%M:%S").to_string())
 }
 
 async fn last_event_today(
@@ -938,7 +965,13 @@ pub async fn build_daily(pool: &SqlitePool, day: &str) -> Result<Vec<serde_json:
         .collect())
 }
 
-pub async fn daily_csv(pool: &SqlitePool, day: &str) -> Result<String> {
+/// Build the daily CSV for `day`, converting first/last UTC ISO wire values into
+/// local human times in `tz_name` before field encoding.
+///
+/// JSON daily responses keep UTC ISO; only this export uses local wall-clock times.
+pub async fn daily_csv(pool: &SqlitePool, day: &str, tz_name: &str) -> Result<String> {
+    // Fail closed on timezone before scanning rows.
+    let _ = local_date_str(Utc::now(), tz_name)?;
     let rows = build_daily(pool, day).await?;
     let mut out = String::new();
     out.push_str(&daily_csv_headers().join(","));
@@ -950,13 +983,15 @@ pub async fn daily_csv(pool: &SqlitePool, day: &str) -> Result<String> {
             .unwrap_or_default();
         let check_in = r["check_in_count"].as_i64().unwrap_or(0).to_string();
         let check_out = r["check_out_count"].as_i64().unwrap_or(0).to_string();
+        let first_in = utc_iso_to_local_hms(r["first_in"].as_str().unwrap_or(""), tz_name)?;
+        let last_out = utc_iso_to_local_hms(r["last_out"].as_str().unwrap_or(""), tz_name)?;
         let cells = [
             csv_encode_field(day, false),
             csv_encode_field(r["employee_code"].as_str().unwrap_or(""), true),
             csv_encode_field(r["full_name"].as_str().unwrap_or(""), true),
             csv_encode_field(r["department"].as_str().unwrap_or(""), true),
-            csv_encode_field(r["first_in"].as_str().unwrap_or(""), false),
-            csv_encode_field(r["last_out"].as_str().unwrap_or(""), false),
+            csv_encode_field(&first_in, false),
+            csv_encode_field(&last_out, false),
             // Numeric count/duration cells stay bare numbers.
             duration,
             csv_encode_field(r["status"].as_str().unwrap_or(""), false),
@@ -1313,7 +1348,7 @@ mod csv_tests {
         .await
         .unwrap();
 
-        let csv = daily_csv(&pool, day).await.unwrap();
+        let csv = daily_csv(&pool, day, "UTC").await.unwrap();
         let headers = daily_csv_headers().join(",");
         assert!(csv.starts_with(&headers), "headers: {csv}");
         assert_eq!(daily_csv_headers().len(), 10);
@@ -1322,6 +1357,9 @@ mod csv_tests {
         assert!(csv.contains(&csv_encode_field("=CMD", true)));
         assert!(csv.contains(&csv_encode_field("Doe, \"John\"", true)));
         assert!(csv.contains(&csv_encode_field("+Finance", true)));
+        // Local human times (not raw UTC ISO) for first_in.
+        assert!(csv.contains("08:00:00"), "expected local hms: {csv}");
+        assert!(!csv.contains("2026-07-12T08:00:00Z"));
         // Numeric cells stay bare.
         assert!(csv.contains(",1,0\n") || csv.lines().any(|l| l.ends_with(",1,0")));
 
@@ -1330,7 +1368,7 @@ mod csv_tests {
             .await
             .unwrap();
         let _ = id2;
-        let csv2 = daily_csv(&pool, day).await.unwrap();
+        let csv2 = daily_csv(&pool, day, "UTC").await.unwrap();
         assert!(csv2.contains("PLAIN"));
         assert!(csv2.contains("Alice"));
 
@@ -1340,6 +1378,115 @@ mod csv_tests {
             csv_encode_field("  =1+1", true)
         );
         assert!(csv_encode_field("a\nb", false).starts_with('"'));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn local_date_str_valid_zones() {
+        // 2026-07-12 22:30 UTC → still 2026-07-12 in UTC, next day in Tehran (+03:30).
+        let utc = Utc.with_ymd_and_hms(2026, 7, 12, 22, 30, 0).unwrap();
+        assert_eq!(local_date_str(utc, "UTC").unwrap(), "2026-07-12");
+        assert_eq!(local_date_str(utc, "Asia/Tehran").unwrap(), "2026-07-13");
+        // Negative offset: America/New_York is UTC-4 in July → still 2026-07-12 afternoon.
+        assert_eq!(
+            local_date_str(utc, "America/New_York").unwrap(),
+            "2026-07-12"
+        );
+        // Instant just after UTC midnight: still previous evening in New York.
+        let after_midnight = Utc.with_ymd_and_hms(2026, 7, 13, 1, 0, 0).unwrap();
+        assert_eq!(local_date_str(after_midnight, "UTC").unwrap(), "2026-07-13");
+        assert_eq!(
+            local_date_str(after_midnight, "America/New_York").unwrap(),
+            "2026-07-12"
+        );
+        assert_eq!(
+            local_date_str(after_midnight, "Asia/Tehran").unwrap(),
+            "2026-07-13"
+        );
+    }
+
+    #[test]
+    fn local_date_str_invalid_never_falls_back() {
+        let utc = Utc.with_ymd_and_hms(2026, 7, 12, 12, 0, 0).unwrap();
+        let err = local_date_str(utc, "Not/A_Zone").unwrap_err().to_string();
+        assert!(err.contains("invalid APP_TIMEZONE"), "{err}");
+        assert!(err.contains("Not/A_Zone"), "{err}");
+    }
+
+    #[test]
+    fn utc_iso_to_local_hms_zones() {
+        let iso = "2026-07-12T20:00:00Z";
+        assert_eq!(utc_iso_to_local_hms(iso, "UTC").unwrap(), "20:00:00");
+        // Asia/Tehran +03:30 → 23:30:00
+        assert_eq!(
+            utc_iso_to_local_hms(iso, "Asia/Tehran").unwrap(),
+            "23:30:00"
+        );
+        // America/New_York UTC-4 in July → 16:00:00
+        assert_eq!(
+            utc_iso_to_local_hms(iso, "America/New_York").unwrap(),
+            "16:00:00"
+        );
+        assert_eq!(utc_iso_to_local_hms("", "UTC").unwrap(), "");
+        assert!(utc_iso_to_local_hms(iso, "Bad/Zone").is_err());
+        assert!(utc_iso_to_local_hms("not-a-timestamp", "UTC").is_err());
+    }
+
+    #[tokio::test]
+    async fn daily_csv_uses_local_human_times() {
+        let (mut settings, data_dir, db_path) = {
+            let id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let data_dir = std::env::temp_dir().join(format!("pksp-db-tz-csv-{id}"));
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let db_path = data_dir.join("test.db");
+            let mut s = Settings::from_env();
+            let abs = db_path
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .to_string();
+            s.database_url = format!("sqlite:////{abs}?mode=rwc");
+            s.data_dir = data_dir.clone();
+            s.camera_upsert = true;
+            s.cam_out_rtsp = String::new();
+            (s, data_dir, db_path)
+        };
+        settings.app_timezone = "Asia/Tehran".into();
+        let pool = connect_pool(&settings).await.unwrap();
+        let id = create_employee(&pool, "E1", "Sam", None).await.unwrap();
+        let day = "2026-07-12";
+        // 08:00 UTC → 11:30 Tehran
+        sqlx::query(
+            "INSERT INTO attendance_events(employee_id, camera_id, kind, score, ts, local_date)
+             VALUES(?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind("cam_in")
+        .bind("check_in")
+        .bind(0.9_f64)
+        .bind("2026-07-12 08:00:00")
+        .bind(day)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let csv = daily_csv(&pool, day, "Asia/Tehran").await.unwrap();
+        assert!(csv.contains("11:30:00"), "csv={csv}");
+        assert!(!csv.contains("2026-07-12T08:00:00Z"));
+
+        // JSON daily keeps UTC wire values.
+        let rows = build_daily(&pool, day).await.unwrap();
+        assert_eq!(rows[0]["first_in"], "2026-07-12T08:00:00Z");
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(&data_dir);

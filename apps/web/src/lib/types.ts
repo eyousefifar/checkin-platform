@@ -83,3 +83,32 @@ export type DailyRow = {
   check_in_count: number;
   check_out_count: number;
 };
+
+/** Camera row from public `/api/health` (no source URLs). */
+export type HealthCamera = {
+  id: string;
+  name: string;
+  direction: string;
+  enabled: boolean;
+  webrtc_path: string;
+};
+
+/** Public process health — timezone is the only settings surface. */
+export type HealthResponse = {
+  status: string;
+  timezone: string;
+  vision_ready: boolean;
+  vision_provider: string;
+  gallery_size: number;
+  cameras: HealthCamera[];
+  media: {
+    mediamtx_running: boolean;
+    transcoder_running: boolean;
+    publication: string;
+    source_mode: string | null;
+    preferred_webrtc_path: string | null;
+    last_error: string | null;
+    mediamtx_path?: string | null;
+    ffmpeg_path?: string | null;
+  };
+};

@@ -76,6 +76,7 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<Value>, AppErr
         .collect();
     Ok(Json(json!({
         "status": "ok",
+        "timezone": state.settings.app_timezone,
         "vision_ready": state.engine.ready(),
         "vision_provider": state.engine.execution_provider(),
         "gallery_size": g.size(),
@@ -327,14 +328,20 @@ pub struct DateQuery {
     employee_id: Option<i64>,
 }
 
+fn default_local_day(settings: &pksp_db::Settings) -> Result<String, AppError> {
+    pksp_db::local_date_str(chrono::Utc::now(), &settings.app_timezone)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 pub async fn daily(
     State(state): State<AppState>,
     _auth: AuthUser,
     Query(q): Query<DateQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let day = q
-        .date
-        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string());
+    let day = match q.date {
+        Some(d) => d,
+        None => default_local_day(&state.settings)?,
+    };
     let rows = build_daily(&state.pool, &day).await?;
     Ok(Json(Value::Array(rows)))
 }
@@ -344,10 +351,11 @@ pub async fn daily_csv(
     _auth: AuthUser,
     Query(q): Query<DateQuery>,
 ) -> Result<Response, AppError> {
-    let day = q
-        .date
-        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string());
-    let content = db_daily_csv(&state.pool, &day).await?;
+    let day = match q.date {
+        Some(d) => d,
+        None => default_local_day(&state.settings)?,
+    };
+    let content = db_daily_csv(&state.pool, &day, &state.settings.app_timezone).await?;
     let mut res = Response::new(Body::from(content));
     *res.status_mut() = StatusCode::OK;
     res.headers_mut().insert(

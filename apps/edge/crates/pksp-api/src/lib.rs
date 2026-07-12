@@ -22,6 +22,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+    // Fail closed on APP_TIMEZONE before DB, models, media, or listener.
+    // Invalid IANA names must not silently fall back to UTC.
+    let _ = pksp_db::local_date_str(chrono::Utc::now(), &settings.app_timezone)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     // Fail closed before DB, models, media children, or vision workers start.
     let addr = settings
         .validate_startup()

@@ -105,6 +105,9 @@ async fn health_returns_200_with_status_cameras_media() {
     assert!(body.get("media").is_some(), "missing media");
     assert!(body["cameras"].is_array());
     assert!(body["media"].is_object());
+    // Timezone is the only settings surface on health (validated APP_TIMEZONE).
+    assert!(body["timezone"].is_string());
+    assert!(!body["timezone"].as_str().unwrap().is_empty());
     // Distinguish process/configuration from a ready publisher.
     assert_eq!(body["media"]["publication"], "unavailable");
     assert!(body["media"]["preferred_webrtc_path"].is_null());
