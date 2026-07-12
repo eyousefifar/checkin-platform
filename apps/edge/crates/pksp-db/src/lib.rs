@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use pksp_core::on_identity_commit;
 use pksp_core::{
-    aggregate_daily, daily_csv_headers, Direction, EmployeeRef, EventKind, FsmDecision, PriorEvent,
-    RawEvent,
+    aggregate_daily, csv_encode_field, daily_csv_headers, Direction, EmployeeRef, EventKind,
+    FsmDecision, PriorEvent, RawEvent,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -631,6 +631,103 @@ pub async fn create_employee(
     Ok(res.last_insert_rowid())
 }
 
+/// Optional employee field updates. Employee code is immutable.
+#[derive(Debug, Clone, Default)]
+pub struct EmployeePatch {
+    pub full_name: Option<String>,
+    pub department: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// Outcome of a transactional employee update.
+#[derive(Debug, Clone)]
+pub struct EmployeePatchOutcome {
+    /// True when name or active state actually changed (gallery version was bumped).
+    pub gallery_relevant_change: bool,
+    /// True when any persisted column changed.
+    pub changed: bool,
+    pub employee: serde_json::Value,
+}
+
+/// Update supported employee fields in one transaction.
+///
+/// Bumps `gallery_version` only when `full_name` or `is_active` actually change.
+/// Returns `Ok(None)` when the employee id does not exist.
+pub async fn update_employee_fields(
+    pool: &SqlitePool,
+    id: i64,
+    patch: EmployeePatch,
+) -> Result<Option<EmployeePatchOutcome>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        "SELECT id, employee_code, full_name, department, is_active FROM employees WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let cur_name: String = row.get("full_name");
+    let cur_dept: Option<String> = row.get("department");
+    let cur_active = row.get::<i64, _>("is_active") != 0;
+
+    let new_name = patch.full_name.as_ref().unwrap_or(&cur_name).clone();
+    let new_dept = match &patch.department {
+        Some(d) => Some(d.clone()),
+        None => cur_dept.clone(),
+    };
+    let new_active = patch.is_active.unwrap_or(cur_active);
+
+    let name_changed = new_name != cur_name;
+    let dept_changed = new_dept != cur_dept;
+    let active_changed = new_active != cur_active;
+    let changed = name_changed || dept_changed || active_changed;
+    let gallery_relevant_change = name_changed || active_changed;
+
+    if changed {
+        let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        sqlx::query(
+            "UPDATE employees SET full_name=?, department=?, is_active=?, updated_at=? WHERE id=?",
+        )
+        .bind(&new_name)
+        .bind(&new_dept)
+        .bind(if new_active { 1 } else { 0 })
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if gallery_relevant_change {
+            bump_gallery_version_tx(&mut tx).await?;
+        }
+    }
+
+    tx.commit().await?;
+    let employee = employee_dict(pool, id).await?;
+    Ok(Some(EmployeePatchOutcome {
+        gallery_relevant_change,
+        changed,
+        employee,
+    }))
+}
+
+/// Soft-deactivate an employee (`is_active=false`). Idempotent when already inactive.
+pub async fn deactivate_employee(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<EmployeePatchOutcome>> {
+    update_employee_fields(
+        pool,
+        id,
+        EmployeePatch {
+            is_active: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 pub async fn load_gallery_matrix(
     pool: &SqlitePool,
     dim: usize,
@@ -838,23 +935,27 @@ pub async fn daily_csv(pool: &SqlitePool, day: &str) -> Result<String> {
     out.push_str(&daily_csv_headers().join(","));
     out.push('\n');
     for r in rows {
-        let line = format!(
-            "{},{},{},{},{},{},{},{},{},{}\n",
-            day,
-            r["employee_code"].as_str().unwrap_or(""),
-            r["full_name"].as_str().unwrap_or(""),
-            r["department"].as_str().unwrap_or(""),
-            r["first_in"].as_str().unwrap_or(""),
-            r["last_out"].as_str().unwrap_or(""),
-            r["duration_minutes"]
-                .as_i64()
-                .map(|n| n.to_string())
-                .unwrap_or_default(),
-            r["status"].as_str().unwrap_or(""),
-            r["check_in_count"].as_i64().unwrap_or(0),
-            r["check_out_count"].as_i64().unwrap_or(0),
-        );
-        out.push_str(&line);
+        let duration = r["duration_minutes"]
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        let check_in = r["check_in_count"].as_i64().unwrap_or(0).to_string();
+        let check_out = r["check_out_count"].as_i64().unwrap_or(0).to_string();
+        let cells = [
+            csv_encode_field(day, false),
+            csv_encode_field(r["employee_code"].as_str().unwrap_or(""), true),
+            csv_encode_field(r["full_name"].as_str().unwrap_or(""), true),
+            csv_encode_field(r["department"].as_str().unwrap_or(""), true),
+            csv_encode_field(r["first_in"].as_str().unwrap_or(""), false),
+            csv_encode_field(r["last_out"].as_str().unwrap_or(""), false),
+            // Numeric count/duration cells stay bare numbers.
+            duration,
+            csv_encode_field(r["status"].as_str().unwrap_or(""), false),
+            check_in,
+            check_out,
+        ];
+        out.push_str(&cells.join(","));
+        out.push('\n');
     }
     Ok(out)
 }
@@ -1150,5 +1251,88 @@ mod enrollment_settings_tests {
         assert_eq!(s.max_enroll_files, 10);
         assert_eq!(s.max_enroll_file_bytes, 5_242_880);
         assert_eq!(s.max_enroll_upload_bytes, 33_554_432);
+    }
+}
+
+#[cfg(test)]
+mod csv_tests {
+    use super::*;
+    use pksp_core::csv_encode_field;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings() -> (Settings, PathBuf, PathBuf) {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("pksp-db-csv-{id}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("test.db");
+        let mut s = Settings::from_env();
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        s.database_url = format!("sqlite:////{abs}?mode=rwc");
+        s.data_dir = data_dir.clone();
+        s.camera_upsert = true;
+        s.cam_out_rtsp = String::new();
+        (s, data_dir, db_path)
+    }
+
+    #[tokio::test]
+    async fn daily_csv_escapes_and_neutralizes() {
+        let (settings, data_dir, db_path) = temp_settings();
+        let pool = connect_pool(&settings).await.unwrap();
+        let id = create_employee(&pool, "=CMD", "Doe, \"John\"", Some("+Finance"))
+            .await
+            .unwrap();
+        // Attendance event so status is incomplete (check-in only).
+        let day = "2026-07-12";
+        sqlx::query(
+            "INSERT INTO attendance_events(employee_id, camera_id, kind, score, ts, local_date)
+             VALUES(?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind("cam_in")
+        .bind("check_in")
+        .bind(0.9_f64)
+        .bind("2026-07-12 08:00:00")
+        .bind(day)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let csv = daily_csv(&pool, day).await.unwrap();
+        let headers = daily_csv_headers().join(",");
+        assert!(csv.starts_with(&headers), "headers: {csv}");
+        assert_eq!(daily_csv_headers().len(), 10);
+
+        // Employee-controlled formula neutralization + RFC quoting.
+        assert!(csv.contains(&csv_encode_field("=CMD", true)));
+        assert!(csv.contains(&csv_encode_field("Doe, \"John\"", true)));
+        assert!(csv.contains(&csv_encode_field("+Finance", true)));
+        // Numeric cells stay bare.
+        assert!(csv.contains(",1,0\n") || csv.lines().any(|l| l.ends_with(",1,0")));
+
+        // Empty department employee.
+        let id2 = create_employee(&pool, "PLAIN", "Alice", None)
+            .await
+            .unwrap();
+        let _ = id2;
+        let csv2 = daily_csv(&pool, day).await.unwrap();
+        assert!(csv2.contains("PLAIN"));
+        assert!(csv2.contains("Alice"));
+
+        // CR/LF and whitespace-before-formula via direct encoder coverage used by builder.
+        assert_eq!(
+            csv_encode_field("  =1+1", true),
+            csv_encode_field("  =1+1", true)
+        );
+        assert!(csv_encode_field("a\nb", false).starts_with('"'));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

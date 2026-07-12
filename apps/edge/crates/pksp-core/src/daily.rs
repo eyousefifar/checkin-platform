@@ -129,6 +129,28 @@ pub fn daily_csv_headers() -> Vec<&'static str> {
     ]
 }
 
+/// Encode one CSV cell (RFC 4180 quoting) with optional spreadsheet-formula neutralization.
+///
+/// When `neutralize_formula` is true and the first non-whitespace character is
+/// `=`, `+`, `-`, or `@`, a leading apostrophe is prefixed so spreadsheet apps
+/// treat the value as text rather than a formula.
+pub fn csv_encode_field(value: &str, neutralize_formula: bool) -> String {
+    let mut s = value.to_string();
+    if neutralize_formula {
+        if let Some(c) = s.trim_start().chars().next() {
+            if matches!(c, '=' | '+' | '-' | '@') {
+                s.insert(0, '\'');
+            }
+        }
+    }
+    if s.contains([',', '"', '\r', '\n']) {
+        let escaped = s.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +226,33 @@ mod tests {
         assert!(h.contains(&"first_in"));
         assert!(h.contains(&"status"));
         assert!(h.contains(&"check_out_count"));
+    }
+
+    #[test]
+    fn csv_encode_plain_and_empty() {
+        assert_eq!(csv_encode_field("Alice", false), "Alice");
+        assert_eq!(csv_encode_field("", false), "");
+        assert_eq!(csv_encode_field("café", false), "café");
+    }
+
+    #[test]
+    fn csv_encode_quotes_specials() {
+        assert_eq!(csv_encode_field("a,b", false), "\"a,b\"");
+        assert_eq!(csv_encode_field("say \"hi\"", false), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_encode_field("a\nb", false), "\"a\nb\"");
+        assert_eq!(csv_encode_field("a\rb", false), "\"a\rb\"");
+    }
+
+    #[test]
+    fn csv_encode_neutralizes_formulas() {
+        assert_eq!(csv_encode_field("=1+1", true), "'=1+1");
+        assert_eq!(csv_encode_field("+cmd", true), "'+cmd");
+        assert_eq!(csv_encode_field("-1", true), "'-1");
+        assert_eq!(csv_encode_field("@x", true), "'@x");
+        assert_eq!(csv_encode_field("  =SUM(A1)", true), "'  =SUM(A1)");
+        // Non-employee fields keep formula chars when neutralize is false.
+        assert_eq!(csv_encode_field("=1+1", false), "=1+1");
+        // Ordinary names are untouched.
+        assert_eq!(csv_encode_field("Alice", true), "Alice");
     }
 }

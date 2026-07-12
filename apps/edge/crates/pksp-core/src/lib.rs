@@ -10,7 +10,8 @@ pub mod track;
 pub mod vote;
 
 pub use daily::{
-    aggregate_daily, daily_csv_headers, derive_status, DailyRow, EmployeeRef, RawEvent, Status,
+    aggregate_daily, csv_encode_field, daily_csv_headers, derive_status, DailyRow, EmployeeRef,
+    RawEvent, Status,
 };
 pub use embed::{l2_normalize, mean_l2_embedding, pack_embedding, unpack_embedding, EmbedError};
 pub use fsm::{

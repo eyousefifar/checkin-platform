@@ -22,7 +22,7 @@ open a pull request unless the operator explicitly asks.
 | 007 | Wire and verify one browser-safe MediaMTX path | P0 | M | 001, 003 | TODO |
 | 008 | Keep WebSocket delivery and camera state live | P1 | M | 001, 005 | TODO |
 | 009 | Publish truthful attendance metrics and scene outcomes | P1 | M | 001, 005, 008, 011 | TODO |
-| 010 | Complete the Rust employee and CSV contracts | P1 | M | 001, 003 | TODO |
+| 010 | Complete the Rust employee and CSV contracts | P1 | M | 001, 003 | DONE |
 | 011 | Apply `APP_TIMEZONE` to dates, times, and CSV | P1 | M | 001, 010 | TODO |
 | 012 | Make employee creation and photo review recoverable | P1 | M | 001, 006 | TODO |
 | 013 | Make browser video state truthful and retryable | P1 | M | 001, 007, 008, 011 | TODO |

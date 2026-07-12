@@ -9,15 +9,45 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{SinkExt, StreamExt};
 use pksp_db::{
-    build_daily, create_employee as db_create, daily_csv as db_daily_csv, employee_dict,
-    list_cameras, list_employees as db_list_employees,
+    build_daily, create_employee as db_create, daily_csv as db_daily_csv,
+    deactivate_employee as db_deactivate, employee_dict, list_cameras,
+    list_employees as db_list_employees, update_employee_fields, EmployeePatch,
 };
-use pksp_vision::enroll_images;
+use pksp_vision::{enroll_images, reload_gallery};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::error;
+
+/// Rate-limit gallery reload error logs (monotonic seconds of last emit).
+static GALLERY_RELOAD_ERR_LOG_SEC: AtomicU64 = AtomicU64::new(0);
+
+/// One immediate retry after commit; never fails the HTTP response.
+async fn converge_gallery_after_commit(state: &AppState) {
+    if reload_gallery(&state.pool, &state.gallery, &state.settings)
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    if let Err(e2) = reload_gallery(&state.pool, &state.gallery, &state.settings).await {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let prev = GALLERY_RELOAD_ERR_LOG_SEC.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) >= 30 {
+            GALLERY_RELOAD_ERR_LOG_SEC.store(now, Ordering::Relaxed);
+            error!(
+                error = %e2,
+                "gallery reload failed after employee mutation; version poll will converge"
+            );
+        }
+    }
+}
 
 pub async fn health(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let cams = list_cameras(&state.pool, true).await?;
@@ -157,35 +187,38 @@ pub async fn update_employee(
     Path(id): Path<i64>,
     Json(body): Json<EmployeeUpdate>,
 ) -> Result<Json<Value>, AppError> {
-    let row = sqlx::query("SELECT id FROM employees WHERE id=?")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    if row.is_none() {
-        return Err(AppError::NotFound("Not found".into()));
+    let touches_gallery = body.full_name.is_some() || body.is_active.is_some();
+    let outcome = update_employee_fields(
+        &state.pool,
+        id,
+        EmployeePatch {
+            full_name: body.full_name,
+            department: body.department,
+            is_active: body.is_active,
+        },
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("Not found".into()))?;
+
+    // Converge in-memory gallery after name/active mutations (including no-ops).
+    if touches_gallery {
+        converge_gallery_after_commit(&state).await;
     }
-    if let Some(n) = body.full_name {
-        sqlx::query("UPDATE employees SET full_name=? WHERE id=?")
-            .bind(n)
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(d) = body.department {
-        sqlx::query("UPDATE employees SET department=? WHERE id=?")
-            .bind(d)
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(a) = body.is_active {
-        sqlx::query("UPDATE employees SET is_active=? WHERE id=?")
-            .bind(if a { 1 } else { 0 })
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    Ok(Json(employee_dict(&state.pool, id).await?))
+    Ok(Json(outcome.employee))
+}
+
+/// Soft-delete: set `is_active=false`. Idempotent; preserves rows and files.
+pub async fn deactivate_employee(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let outcome = db_deactivate(&state.pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Not found".into()))?;
+    // Always attempt gallery convergence (even when already inactive).
+    converge_gallery_after_commit(&state).await;
+    Ok(Json(outcome.employee))
 }
 
 pub async fn upload_images(

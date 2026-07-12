@@ -195,7 +195,9 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/employees/{id}",
-            get(routes::get_employee).patch(routes::update_employee),
+            get(routes::get_employee)
+                .patch(routes::update_employee)
+                .delete(routes::deactivate_employee),
         )
         .route(
             "/api/employees/{id}/images",
