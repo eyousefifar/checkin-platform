@@ -38,14 +38,48 @@ export NEXT_PUBLIC_WS_URL=ws://<host>:8000/api/ws/live
 export NEXT_PUBLIC_WEBRTC_BASE=http://<host>:8889
 ```
 
-## Camera codec
+## Camera codec / publication
 
-Prefer **H.264** substream for browser WHEP. If only H.265 `stream1` is available, set `CAM_IN_RTSP` to that URL and let `pksp serve` run the supervised ffmpeg transcoder → `cam_in_h264`. Or set:
+Set an explicit publication mode (no auto-inference from URL contents):
 
 ```bash
-# Prefer a credential-free H.264 path (set only in private .env):
-# export CAM_IN_H264_RTSP=   # no user-info in tracked docs
-export FORCE_TRANSCODE=true                            # force transcoder
+# Default: MediaMTX only (demo publisher or external process)
+export MEDIA_SOURCE_MODE=external
+export CAM_IN_WEBRTC_PATH=demo
+
+# Native H.264 substream → stream-copy into cam_in_h264 (private .env only):
+# export MEDIA_SOURCE_MODE=copy
+# export CAM_IN_H264_RTSP=rtsp://...   # never commit user-info
+# export MEDIA_PUBLISH_PATH=cam_in_h264
+
+# H.265 / high-res → supervised ffmpeg transcode into cam_in_h264:
+# export MEDIA_SOURCE_MODE=transcode
+# export CAM_IN_RTSP=rtsp://...        # vision + transcode source
+
+export MEDIAMTX_API_ADDR=127.0.0.1:9997
+```
+
+FFmpeg still receives the RTSP URL in process arguments. Run under a dedicated
+service account on a dedicated appliance; a shared interactive host is not an
+accepted credential boundary.
+
+### WebRTC candidates (LAN browsers)
+
+Bundled config uses `webrtcAdditionalHosts: [127.0.0.1]`. Before remote LAN
+browser acceptance, set the appliance address:
+
+```bash
+export MTX_WEBRTCADDITIONALHOSTS=192.168.1.10
+```
+
+Do not guess interfaces in application code. RTSP is TCP-only
+(`rtspTransports: [tcp]`); WebRTC media listens on UDP 8189.
+
+### Media smoke
+
+```bash
+./apps/edge/scripts/download-binaries.sh   # checksum-verified MediaMTX v1.11.3
+./apps/edge/scripts/smoke-media.sh        # lavfi testsrc → temporary MediaMTX
 ```
 
 ## Smart scene zones

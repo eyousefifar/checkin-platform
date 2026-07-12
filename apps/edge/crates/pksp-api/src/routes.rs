@@ -53,25 +53,15 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<Value>, AppErr
     let cams = list_cameras(&state.pool, true).await?;
     let media = state.media_status.lock().await;
     let g = state.gallery.read().unwrap();
+    let publication = media.publication.as_str();
     let cameras: Vec<Value> = cams
         .into_iter()
         .map(|c| {
             let path = if c.id == "cam_in" {
-                // Browser-safe path: explicit H.264 path, transcoder publish, or configured
-                if !state.settings.cam_in_h264_rtsp.is_empty() {
-                    // Native H.264 camera still uses configured webrtc path (often cam_in)
-                    c.webrtc_path.clone()
-                } else if let Some(p) = &media.preferred_webrtc_path {
-                    p.clone()
-                } else if c.webrtc_path == "cam_in"
-                    && (state.settings.cam_in_rtsp.contains("stream1")
-                        || std::env::var("FORCE_TRANSCODE").as_deref() == Ok("true"))
-                {
-                    // Prefer H.264 publish path when we expect H.265 source
-                    "cam_in_h264".to_string()
-                } else {
-                    c.webrtc_path.clone()
-                }
+                // Only advertise a ready publisher path when publication is ready.
+                // Otherwise keep configured path for demo/external, or report publish path
+                // as unavailable/starting via media.publication (not a silent false ready).
+                pksp_media::browser_safe_path(&c.webrtc_path, &media)
             } else {
                 c.webrtc_path.clone()
             };
@@ -93,6 +83,9 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<Value>, AppErr
         "media": {
             "mediamtx_running": media.mediamtx_running,
             "transcoder_running": media.transcoder_running,
+            "publication": publication,
+            "source_mode": media.source_mode,
+            "preferred_webrtc_path": media.preferred_webrtc_path,
             "last_error": media.last_error,
             "mediamtx_path": media.mediamtx_path,
             "ffmpeg_path": media.ffmpeg_path,

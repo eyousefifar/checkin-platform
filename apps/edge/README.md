@@ -70,7 +70,17 @@ export NEXT_PUBLIC_WEBRTC_BASE=http://localhost:8889
 
 Resolution order: `MEDIAMTX_BIN` / `FFMPEG_BIN` env → `apps/edge/bin/` → PATH.
 
-**Codec policy:** prefer `CAM_IN_H264_RTSP` (or H.264 camera path). If `CAM_IN_RTSP` is H.265/`stream1`, supervised ffmpeg publishes `cam_in_h264` and health returns that browser-safe path. `FORCE_TRANSCODE=true` forces transcoder.
+**Publication policy** is explicit via `MEDIA_SOURCE_MODE` (default `external`):
+
+| Mode | Input | Behavior |
+|---|---|---|
+| `external` | — | MediaMTX only; demo/operator publishes to `CAM_IN_WEBRTC_PATH` |
+| `copy` | `CAM_IN_H264_RTSP` | Stream-copy H.264 → `MEDIA_PUBLISH_PATH` (`cam_in_h264`) |
+| `transcode` | `CAM_IN_RTSP` | Encode H.264 → `MEDIA_PUBLISH_PATH` |
+
+Health sets `media.publication` to `ready` only when the MediaMTX API reports a live publisher on the publish path. Source RTSP URLs are never logged or returned in API status.
+
+Verify: `./apps/edge/scripts/smoke-media.sh` (generated test video).
 
 **GStreamer is not required.** See `docs/media-rust-bindings.md`, `docs/deploy.md`.
 

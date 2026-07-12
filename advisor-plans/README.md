@@ -19,7 +19,7 @@ open a pull request unless the operator explicitly asks.
 | 004 | Replace heuristic face inference with SCRFD and ArcFace | P0 | L | 001, 002 | DONE |
 | 005 | Process each frame once and isolate blocking inference | P0 | M | 001, 004 | DONE |
 | 006 | Make enrollment cumulative, bounded, and recoverable | P0 | M | 001, 004, 005 | DONE |
-| 007 | Wire and verify one browser-safe MediaMTX path | P0 | M | 001, 003 | TODO |
+| 007 | Wire and verify one browser-safe MediaMTX path | P0 | M | 001, 003 | DONE |
 | 008 | Keep WebSocket delivery and camera state live | P1 | M | 001, 005 | DONE |
 | 009 | Publish truthful attendance metrics and scene outcomes | P1 | M | 001, 005, 008, 011 | TODO |
 | 010 | Complete the Rust employee and CSV contracts | P1 | M | 001, 003 | DONE |

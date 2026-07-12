@@ -2,13 +2,12 @@ services:
   mediamtx:
     image: bluenviron/mediamtx:1.11.3
     ports:
-      - "8554:8554"   # RTSP
+      - "8554:8554"   # RTSP (TCP; config sets rtspTransports: [tcp])
       - "1935:1935"   # RTMP
       - "8888:8888"   # HLS
-      - "8889:8889"   # WebRTC
+      - "8889:8889"   # WebRTC HTTP
+      - "8189:8189/udp"  # WebRTC media
       - "9997:9997"   # API
-    env_file:
-      - .env   # Enables ${IP_CAMERA_USER} etc. substitution in mediamtx.yml
     volumes:
       - ./configs/mediamtx.yml:/mediamtx.yml:ro
     restart: unless-stopped

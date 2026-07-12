@@ -10,7 +10,7 @@ pub use state::AppState;
 use axum::routing::{get, post};
 use axum::Router;
 use pksp_db::{connect_pool, list_cameras, Settings};
-use pksp_media::{MediaConfig, MediaSupervisor};
+use pksp_media::MediaSupervisor;
 use pksp_vision::{
     reload_gallery, start_vision_worker, FaceEngine, Gallery, MockFaceEngine, OrtFaceEngine,
 };
@@ -61,24 +61,24 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     let (tx, _) = broadcast::channel::<serde_json::Value>(256);
 
     // Media supervisor: bundled MediaMTX + optional ffmpeg under apps/edge/bin/
-    // Prefer explicit H.264 RTSP; else transcoder for H.265 / stream1 / FORCE_TRANSCODE.
+    // Publication policy is explicit (MEDIA_SOURCE_MODE); never inferred from URLs alone.
     let work_dir = settings.data_dir.clone();
-    let force_tc = std::env::var("FORCE_TRANSCODE").as_deref() == Ok("true");
-    let need_transcode =
-        pksp_media::should_transcode(&settings.cam_in_rtsp, &settings.cam_in_h264_rtsp, force_tc);
-    let media_cfg = MediaConfig {
-        mediamtx_bin: settings.mediamtx_bin.clone(),
-        config_path: settings.mediamtx_config.clone(),
-        ffmpeg_bin: settings.ffmpeg_bin.clone(),
-        // Prefer H.264 source for transcoder input when available, else high-res H.265
-        h265_rtsp: if need_transcode {
-            Some(settings.cam_in_rtsp.clone())
-        } else {
-            None
-        },
-        h264_publish_path: "cam_in_h264".into(),
+    let mode = pksp_media::MediaSourceMode::parse(&settings.media_source_mode)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let api_addr = pksp_media::parse_mediamtx_api_addr(&settings.mediamtx_api_addr)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let media_cfg = pksp_media::build_media_config(
+        mode,
+        &settings.cam_in_rtsp,
+        &settings.cam_in_h264_rtsp,
+        &settings.media_publish_path,
+        settings.mediamtx_bin.clone(),
+        settings.mediamtx_config.clone(),
+        settings.ffmpeg_bin.clone(),
         work_dir,
-    };
+        api_addr,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let media = Arc::new(MediaSupervisor::new(media_cfg));
     media.start();
     let media_status = media.status_handle();

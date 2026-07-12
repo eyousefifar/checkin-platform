@@ -1,5 +1,8 @@
 # MediaMTX — RTSP in, WebRTC/HLS out for browser + vision
 # Docs: https://github.com/bluenviron/mediamtx
+# Static publisher-only paths. Container mode needs an external publisher when
+# the Rust supervisor is not running. Do not embed shell interpolation or
+# credential-bearing URLs in this file.
 
 logLevel: info
 api: yes
@@ -7,25 +10,30 @@ apiAddress: :9997
 
 rtsp: yes
 rtspAddress: :8554
+rtspTransports: [tcp]
 rtmp: yes
 rtmpAddress: :1935
 hls: yes
 hlsAddress: :8888
 webrtc: yes
 webrtcAddress: :8889
-# Host candidates for LAN WebRTC (override if needed)
-# webrtcAdditionalHosts: [192.168.1.10]
+webrtcLocalUDPAddress: :8189
+# Same-host default. For remote LAN browsers override with:
+#   MTX_WEBRTCADDITIONALHOSTS=192.168.x.x
+webrtcAdditionalHosts: [127.0.0.1]
+srt: no
+playback: no
+metrics: no
+pprof: no
 
 paths:
-  # Demo path: publish with scripts/demo_rtsp.sh (ffmpeg)
   demo:
     source: publisher
 
   cam_in:
-    # Pull path for the entrance camera. Prefer a credential-free local publisher
-    # or set CAM_IN_RTSP in a private (untracked) .env and point MediaMTX source
-    # at a path that does not embed user-info in tracked config.
-    # Never commit camera user:password URL user-info.
+    source: publisher
+
+  cam_in_h264:
     source: publisher
 
   cam_out:

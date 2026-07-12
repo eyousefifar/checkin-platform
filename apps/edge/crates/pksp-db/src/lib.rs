@@ -61,8 +61,14 @@ pub struct Settings {
     pub onnx_providers: String,
     pub require_real_vision: bool,
     pub vision_adaptive: bool,
-    /// Preferred browser-safe H.264 RTSP (skips transcoder when set).
+    /// Preferred browser-safe H.264 RTSP (used when MEDIA_SOURCE_MODE=copy).
     pub cam_in_h264_rtsp: String,
+    /// Publication policy: external | copy | transcode (default external).
+    pub media_source_mode: String,
+    /// Browser publish path name inside MediaMTX (default cam_in_h264).
+    pub media_publish_path: String,
+    /// Loopback MediaMTX HTTP API (default 127.0.0.1:9997).
+    pub mediamtx_api_addr: String,
     pub bind_addr: String,
     /// Empty or "mediamtx" → auto-resolve apps/edge/bin/mediamtx then PATH
     pub mediamtx_bin: String,
@@ -151,6 +157,9 @@ impl Settings {
             require_real_vision: env_or("REQUIRE_REAL_VISION", "false") == "true",
             vision_adaptive: env_or("VISION_ADAPTIVE", "false") == "true",
             cam_in_h264_rtsp: env_or("CAM_IN_H264_RTSP", ""),
+            media_source_mode: env_or("MEDIA_SOURCE_MODE", "external"),
+            media_publish_path: env_or("MEDIA_PUBLISH_PATH", "cam_in_h264"),
+            mediamtx_api_addr: env_or("MEDIAMTX_API_ADDR", "127.0.0.1:9997"),
             bind_addr: env_or("BIND_ADDR", "127.0.0.1:8000"),
             // Auto-resolve bundled apps/edge/bin/* unless overridden
             mediamtx_bin: env_or("MEDIAMTX_BIN", "mediamtx"),

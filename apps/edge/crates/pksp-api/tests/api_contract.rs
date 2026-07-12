@@ -105,6 +105,44 @@ async fn health_returns_200_with_status_cameras_media() {
     assert!(body.get("media").is_some(), "missing media");
     assert!(body["cameras"].is_array());
     assert!(body["media"].is_object());
+    // Distinguish process/configuration from a ready publisher.
+    assert_eq!(body["media"]["publication"], "unavailable");
+    assert!(body["media"]["preferred_webrtc_path"].is_null());
+    // Never leak source URLs in health.
+    let media_s = body["media"].to_string();
+    assert!(!media_s.contains("rtsp://"));
+}
+
+#[tokio::test]
+async fn health_media_publication_ready_exposes_path_without_source_url() {
+    use pksp_media::PublicationState;
+    let db = temp_db();
+    let state = test_state(&db).await;
+    {
+        let mut media = state.media_status.lock().await;
+        media.mediamtx_running = true;
+        media.transcoder_running = true;
+        media.publication = PublicationState::Ready;
+        media.preferred_webrtc_path = Some("cam_in_h264".into());
+        media.source_mode = Some("transcode".into());
+    }
+    let router = app(state);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = body_json(res).await;
+    assert_eq!(body["media"]["publication"], "ready");
+    assert_eq!(body["media"]["preferred_webrtc_path"], "cam_in_h264");
+    assert_eq!(body["media"]["source_mode"], "transcode");
+    let media_s = body["media"].to_string();
+    assert!(!media_s.contains("rtsp://"));
 }
 
 #[tokio::test]

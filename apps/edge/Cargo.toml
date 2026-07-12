@@ -45,6 +45,6 @@ subtle = "2"
 base64 = "0.22"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
 tokio-tungstenite = "0.26"
 url = "2"

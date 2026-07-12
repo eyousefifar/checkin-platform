@@ -1,30 +1,36 @@
 # MediaMTX config owned by pksp edge (bundled binary under apps/edge/bin/mediamtx)
+# Static publisher-only paths — inject sources via the Rust supervisor or MTX_* env.
 logLevel: info
 api: yes
 apiAddress: :9997
 
 rtsp: yes
 rtspAddress: :8554
+rtspTransports: [tcp]
 rtmp: yes
 rtmpAddress: :1935
 hls: yes
 hlsAddress: :8888
 webrtc: yes
 webrtcAddress: :8889
-
-# Allow LAN WebRTC; override if needed
-# webrtcAdditionalHosts: [192.168.1.10]
+webrtcLocalUDPAddress: :8189
+# Same-host default. For remote LAN browsers set MTX_WEBRTCADDITIONALHOSTS to the
+# appliance LAN address (never guess interfaces in application code).
+webrtcAdditionalHosts: [127.0.0.1]
+# Disable unused listeners (defaults would open extra host ports).
+srt: no
+playback: no
+metrics: no
+pprof: no
 
 paths:
-  # Demo / publisher path (ffmpeg can push here)
   demo:
     source: publisher
 
-  # Optional direct camera pull — leave as publisher if feeding via RTMP transcoder
   cam_in:
     source: publisher
 
-  # Browser-safe H.264 path (ffmpeg publishes RTMP here when source is H.265)
+  # Browser-safe H.264 path (ffmpeg publishes RTMP here in copy/transcode mode)
   cam_in_h264:
     source: publisher
 
