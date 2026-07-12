@@ -11,3 +11,6 @@ describe("whepUrl", () => {
     );
   });
 });
+
+// connectWhep itself is exercised via CameraTile tests with a mocked boundary;
+// URL shaping is the pure unit under test here.

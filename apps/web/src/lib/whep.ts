@@ -41,8 +41,15 @@ export async function connectWhep(
   pc.ontrack = (ev) => {
     if (ev.streams[0]) {
       video.srcObject = ev.streams[0];
+      // Surface track end as a DOM event so UI lifecycle can leave "playing"
+      // without owning the PeerConnection internals.
+      for (const track of ev.streams[0].getTracks()) {
+        track.addEventListener("ended", () => {
+          video.dispatchEvent(new Event("wheptrackended"));
+        });
+      }
       void video.play().catch(() => {
-        /* autoplay policies */
+        /* autoplay policies — caller must not treat this as success */
       });
     }
   };

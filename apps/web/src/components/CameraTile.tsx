@@ -5,6 +5,11 @@ import { FaceHudCanvas } from "./FaceHudCanvas";
 import { connectWhep, whepUrl, type WhepHandle } from "@/lib/whep";
 import type { FaceDet } from "@/lib/types";
 
+type VideoLifecycle = "connecting" | "playing" | "error";
+
+const INITIAL_RETRY_MS = 2000;
+const MAX_RETRY_MS = 10000;
+
 export function CameraTile({
   cameraId,
   name,
@@ -21,21 +26,16 @@ export function CameraTile({
   online?: boolean;
   faces: FaceDet[];
   fps?: number;
+  /** MediaMTX path from health; omitted while health is still retrying. */
   webrtcPath?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [size, setSize] = useState({ w: 640, h: 360 });
-  const [videoOk, setVideoOk] = useState(false);
+  const [videoState, setVideoState] = useState<VideoLifecycle>("connecting");
   const [videoError, setVideoError] = useState<string | null>(null);
-  const [useHlsFallback, setUseHlsFallback] = useState(false);
   const webrtcBase =
     process.env.NEXT_PUBLIC_WEBRTC_BASE || "http://localhost:8889";
-  const path = webrtcPath || (cameraId === "cam_in" ? "demo" : cameraId);
-
-  // HLS fallback URL (MediaMTX serves HLS on 8888 from the same path)
-  const hlsBase = webrtcBase.replace(":8889", ":8888");
-  const hlsUrl = `${hlsBase}/${path}/index.m3u8`;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -48,55 +48,115 @@ export function CameraTile({
     return () => ro.disconnect();
   }, []);
 
-  // WHEP live video path (MediaMTX) with HLS fallback for codec issues (e.g. H265 source)
+  // Single WHEP playback lifecycle: connecting → playing | error (with retry).
+  // SDP success is not "playing"; only the video `playing` event is.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    // Do not assume a path while health has not resolved webrtcPath.
+    if (!webrtcPath) {
+      setVideoState("connecting");
+      setVideoError(null);
+      return;
+    }
+
     let handle: WhepHandle | null = null;
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryAttempt = 0;
 
-    const endpoint = whepUrl(webrtcBase, path);
+    const endpoint = whepUrl(webrtcBase, webrtcPath);
 
-    const tryHls = () => {
-      if (cancelled) return;
-      setUseHlsFallback(true);
-      setVideoOk(false);
-      setVideoError("WHEP codec incompatible (H265 source) — using HLS fallback");
-      video.srcObject = null;
-      video.src = hlsUrl;
-      video.play().catch(() => {});
-      // HLS is one-shot; no auto WHEP retry while in fallback
+    const clearRetry = () => {
+      if (retryTimer != null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
     };
 
-    const start = async () => {
-      if (useHlsFallback) return; // stay on HLS once chosen
+    const closeHandle = () => {
+      if (handle) {
+        handle.close();
+        handle = null;
+      }
+      if (video.srcObject) {
+        video.srcObject = null;
+      }
+    };
+
+    const scheduleRetry = (reason: string) => {
+      if (cancelled) return;
+      setVideoState("error");
+      setVideoError(reason);
+      clearRetry();
+      const delay = Math.min(MAX_RETRY_MS, INITIAL_RETRY_MS * 2 ** retryAttempt);
+      retryAttempt += 1;
+      retryTimer = setTimeout(() => {
+        if (!cancelled) void start();
+      }, delay);
+    };
+
+    const onPlaying = () => {
+      if (cancelled) return;
+      retryAttempt = 0;
+      setVideoState("playing");
       setVideoError(null);
-      setUseHlsFallback(false);
+    };
+
+    const onWaitingOrStalled = () => {
+      if (cancelled) return;
+      // Leave playing and surface reconnect intent without treating as terminal.
+      setVideoState((prev) => (prev === "playing" ? "connecting" : prev));
+    };
+
+    const onVideoError = () => {
+      if (cancelled) return;
+      scheduleRetry("Video element error — retrying WHEP");
+    };
+
+    const onTrackEnded = () => {
+      if (cancelled) return;
+      scheduleRetry("Media track ended — retrying WHEP");
+    };
+
+    video.addEventListener("playing", onPlaying);
+    video.addEventListener("waiting", onWaitingOrStalled);
+    video.addEventListener("stalled", onWaitingOrStalled);
+    video.addEventListener("error", onVideoError);
+    video.addEventListener("wheptrackended", onTrackEnded);
+
+    const start = async () => {
+      if (cancelled) return;
+      clearRetry();
+      closeHandle();
+      setVideoState("connecting");
+      setVideoError(null);
       try {
         handle = await connectWhep(endpoint, video);
         if (cancelled) {
           handle.close();
+          handle = null;
           return;
         }
-        setVideoOk(true);
+
+        // Connection failure after SDP success.
+        handle.pc.onconnectionstatechange = () => {
+          if (cancelled || !handle) return;
+          const st = handle.pc.connectionState;
+          if (st === "failed" || st === "disconnected" || st === "closed") {
+            scheduleRetry(`WebRTC ${st} — retrying WHEP`);
+          }
+        };
+        // Stay in connecting until `playing` fires — SDP alone is not live.
       } catch (err) {
         if (cancelled) return;
-        setVideoOk(false);
         const raw = err instanceof Error ? err.message : "WHEP failed";
-        if (raw.includes("400")) {
-          // Codec problem (very common with H265/HEVC cameras + standard browser WebRTC)
-          setVideoError("WHEP 400 (codec mismatch — H265 source vs browser)");
-          tryHls();
-          return;
-        }
         const display =
           raw.toLowerCase().includes("network") || raw.includes("fetch")
             ? `MediaMTX unreachable at ${webrtcBase} (docker compose up -d mediamtx?)`
             : raw;
-        setVideoError(display);
-        // retry WHEP
-        retryTimer = setTimeout(start, 4000);
+        scheduleRetry(display);
       }
     };
 
@@ -104,24 +164,35 @@ export function CameraTile({
 
     return () => {
       cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      handle?.close();
-      // cleanup HLS if active
-      if (video.src) {
-        video.pause();
-        video.src = "";
-      }
+      clearRetry();
+      video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("waiting", onWaitingOrStalled);
+      video.removeEventListener("stalled", onWaitingOrStalled);
+      video.removeEventListener("error", onVideoError);
+      video.removeEventListener("wheptrackended", onTrackEnded);
+      closeHandle();
     };
-  }, [webrtcBase, path, hlsUrl, useHlsFallback]);
+  }, [webrtcBase, webrtcPath]);
 
-  const showVideo = videoOk || useHlsFallback;
+  const showVideo = videoState === "playing";
+  const cameraLabel =
+    online === true ? "ONLINE" : online === false ? "OFFLINE" : "UNKNOWN";
+  const cameraStatus =
+    online === true ? "online" : online === false ? "offline" : "unknown";
+  const videoLabel =
+    videoState === "playing"
+      ? "VIDEO LIVE"
+      : videoState === "connecting"
+        ? "CONNECTING"
+        : "VIDEO ERROR";
 
   return (
     <div
       ref={containerRef}
       className="hud-brackets relative aspect-video w-full overflow-hidden border border-hairline bg-soft scanline"
       data-camera={cameraId}
-      data-webrtc-path={path}
+      data-webrtc-path={webrtcPath || ""}
+      data-video-state={videoState}
     >
       <span className="bracket-bl" />
       <span className="bracket-br" />
@@ -129,43 +200,39 @@ export function CameraTile({
       <video
         ref={videoRef}
         className={`absolute inset-0 z-0 h-full w-full object-cover ${
-          showVideo || useHlsFallback ? "opacity-100" : "opacity-0"
+          showVideo ? "opacity-100" : "opacity-0"
         }`}
         playsInline
         muted
         autoPlay
-        // For HLS fallback we set .src ; for WHEP we set .srcObject in connectWhep
-        src={useHlsFallback ? hlsUrl : undefined}
         data-testid="camera-video"
       />
 
-      {!showVideo && !useHlsFallback && (
+      {!showVideo && (
         <div className="absolute inset-0 z-[1] flex items-center justify-center bg-gradient-to-b from-[#0a0a0a] to-[#111]">
           <div className="text-center px-4">
             <div className="font-mono text-[10px] uppercase tracking-label text-muted">
-              {online === true
-                ? "Vision online · awaiting WebRTC"
-                : online === false
-                  ? "Camera offline"
-                  : "Camera status unknown"}
+              {!webrtcPath
+                ? "Health retrying · waiting for stream path"
+                : online === true
+                  ? "Vision online · awaiting WebRTC"
+                  : online === false
+                    ? "Camera offline"
+                    : "Camera status unknown"}
             </div>
             <div className="mt-1 text-xs text-body">
-              {webrtcBase}/{path}
+              {webrtcPath ? `${webrtcBase}/${webrtcPath}` : "path pending"}
             </div>
-            <div className="mt-2 font-mono text-[10px] text-muted">
-              WHEP · {videoError || "connecting…"}
+            <div
+              className="mt-2 font-mono text-[10px] text-muted"
+              data-testid="video-status-text"
+            >
+              WHEP · {videoError || (videoState === "connecting" ? "connecting…" : videoState)}
             </div>
             <div className="mt-3 text-[10px] text-muted">
               Canvas HUD from WS · video via MediaMTX when stream is live
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Small indicator when HLS fallback is active */}
-      {useHlsFallback && (
-        <div className="absolute top-2 right-2 z-30 bg-black/60 px-1.5 py-0.5 text-[9px] text-muted">
-          HLS fallback
         </div>
       )}
 
@@ -182,21 +249,29 @@ export function CameraTile({
       <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
         <span
           className={`px-2 py-1 text-[10px] font-bold uppercase tracking-label ${
-            online === true || videoOk
+            online === true
               ? "bg-success/20 text-success"
               : online === false
                 ? "bg-m-red/20 text-m-red"
                 : "bg-black/70 text-muted"
           }`}
-          data-camera-status={
-            online === true ? "online" : online === false ? "offline" : "unknown"
-          }
+          data-camera-status={cameraStatus}
+          data-testid="camera-capture-badge"
         >
-          {online === true || videoOk
-            ? "ONLINE"
-            : online === false
-              ? "OFFLINE"
-              : "UNKNOWN"}
+          {cameraLabel}
+        </span>
+        <span
+          className={`px-2 py-1 text-[10px] font-bold uppercase tracking-label ${
+            videoState === "playing"
+              ? "bg-success/20 text-success"
+              : videoState === "error"
+                ? "bg-m-red/20 text-m-red"
+                : "bg-black/70 text-muted"
+          }`}
+          data-testid="browser-video-badge"
+          data-video-badge={videoState}
+        >
+          {videoLabel}
         </span>
         {fps != null && (
           <span className="bg-black/70 px-2 py-1 font-mono text-[10px] text-muted">

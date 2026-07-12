@@ -1,35 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { CameraTile } from "@/components/CameraTile";
 import { EventTicker } from "@/components/EventTicker";
 import { MetricPill } from "@/components/MetricPill";
+import { useHealth } from "@/hooks/useHealth";
 import { useLiveWs } from "@/hooks/useLiveWs";
-import { API_URL } from "@/lib/api";
 
 export default function DashboardPage() {
   const { connected, detections, events, metrics, cameraOnline } = useLiveWs();
+  const { data: health, loading: healthLoading, error: healthError } = useHealth();
   // Do not infer camera capture from WS transport connectivity.
   const camInOnline = cameraOnline["cam_in"];
   const fps = metrics?.vision_fps?.cam_in;
 
-  // Resolve webrtcPath from the server (public /health already exposes the
-  // webrtc_path that was seeded from config + .env). This keeps the UI in
-  // sync with "demo" (default) vs "cam_in" (real-cam override) etc.
-  const [webrtcPath, setWebrtcPath] = useState<string>("demo");
-  useEffect(() => {
-    fetch(`${API_URL}/api/health`)
-      .then((r) => r.json())
-      .then((h: any) => {
-        const cam = (h.cameras || []).find((c: any) => c.id === "cam_in");
-        if (cam && cam.webrtc_path) {
-          setWebrtcPath(cam.webrtc_path);
-        }
-      })
-      .catch(() => {
-        /* keep safe default; dashboard + HUD still work without MTX */
-      });
-  }, []);
+  const camIn = health?.cameras?.find((c) => c.id === "cam_in");
+  // Only pass a path once health has returned one — never hammer a guessed path.
+  const webrtcPath = camIn?.webrtc_path;
 
   return (
     <div className="dashboard-grid min-h-[calc(100vh-7rem)] p-6">
@@ -42,12 +28,22 @@ export default function DashboardPage() {
             On-prem vision · WebSocket HUD · no cloud face APIs
           </p>
         </div>
-        <div
-          className={`text-[11px] font-bold uppercase tracking-label ${
-            connected ? "text-success" : "text-warning"
-          }`}
-        >
-          {connected ? "WS linked" : "WS reconnecting…"}
+        <div className="flex items-center gap-3">
+          {(healthLoading || healthError || !health) && (
+            <div
+              className="text-[11px] font-bold uppercase tracking-label text-warning"
+              data-testid="health-retrying"
+            >
+              {healthError ? `Health retrying · ${healthError}` : "Health retrying…"}
+            </div>
+          )}
+          <div
+            className={`text-[11px] font-bold uppercase tracking-label ${
+              connected ? "text-success" : "text-warning"
+            }`}
+          >
+            {connected ? "WS linked" : "WS reconnecting…"}
+          </div>
         </div>
       </div>
 
