@@ -16,6 +16,17 @@ pub fn quality_gate(
     frame_h: i32,
     bbox_normalized: bool,
 ) -> QualityResult {
+    if !det_score.is_finite()
+        || !bbox_xyxy.0.is_finite()
+        || !bbox_xyxy.1.is_finite()
+        || !bbox_xyxy.2.is_finite()
+        || !bbox_xyxy.3.is_finite()
+    {
+        return QualityResult {
+            ok: false,
+            reason: Some("non_finite".into()),
+        };
+    }
     if det_score < min_det_score {
         return QualityResult {
             ok: false,
@@ -319,4 +330,19 @@ mod tests {
         assert!(!r.ok);
         assert_eq!(r.reason.as_deref(), Some("low_blur"));
     }
+}
+
+#[test]
+fn non_finite_rejected() {
+    let r = quality_gate(
+        f32::NAN,
+        (10.0, 10.0, 100.0, 100.0),
+        0.5,
+        60,
+        1920,
+        1080,
+        false,
+    );
+    assert!(!r.ok);
+    assert_eq!(r.reason.as_deref(), Some("non_finite"));
 }

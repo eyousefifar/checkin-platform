@@ -118,6 +118,21 @@ disk encryption instead of inventing a portability layer.
 
 If Rust ONNX embeddings are not cosine-compatible with Python InsightFace (≥0.99), **re-enroll all employees** under Rust. Do not mix mock and real embeddings in one gallery for production punches.
 
+## Real-model verification (operator-owned fixtures)
+
+Do **not** commit face images or embeddings. Locally:
+
+```bash
+# Directory contains only private fixtures + manifest.json
+# { "images": [ { "file": "a.jpg", "faces": 1, "expect_embedding": true }, ... ] }
+export PKSP_VISION_FIXTURE_DIR=/path/to/private/fixtures
+cd apps/edge
+cargo test -p pksp-vision --features ort --locked real_model -- --ignored
+```
+
+Blank-frame smoke (models present, no fixtures):  
+`cargo test -p pksp-vision --features ort --locked real_model_blank_frame`
+
 ## Known limits
 
 - buffalo_l weights may be non-commercial

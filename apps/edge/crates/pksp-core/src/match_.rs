@@ -41,6 +41,17 @@ pub fn match_top1(
             label: "UNKNOWN".into(),
         };
     }
+    // Non-finite query or gallery vectors must never select an employee.
+    if query.iter().any(|x| !x.is_finite())
+        || gallery.iter().any(|row| row.iter().any(|x| !x.is_finite()))
+    {
+        return MatchResult {
+            employee_id: None,
+            score: 0.0,
+            margin: 0.0,
+            label: "UNKNOWN".into(),
+        };
+    }
 
     let scores = cosine_scores(query, gallery);
     let mut order: Vec<usize> = (0..scores.len()).collect();

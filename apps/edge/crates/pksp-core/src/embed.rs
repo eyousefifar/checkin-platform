@@ -10,6 +10,8 @@ pub enum EmbedError {
     Empty,
     #[error("blob length {got} not divisible by 4")]
     BadBlob { got: usize },
+    #[error("non-finite embedding value")]
+    NonFinite,
 }
 
 /// L2-normalize `v` (eps 1e-12). Returns a new vec.
@@ -25,6 +27,14 @@ pub fn l2_normalize_eps(v: &[f32], eps: f32) -> Vec<f32> {
     v.iter().map(|x| x / n).collect()
 }
 
+fn reject_non_finite(v: &[f32]) -> Result<(), EmbedError> {
+    if v.iter().any(|x| !x.is_finite()) {
+        Err(EmbedError::NonFinite)
+    } else {
+        Ok(())
+    }
+}
+
 /// Pack float32 little-endian C-order bytes. Length must equal `dim`.
 pub fn pack_embedding(v: &[f32], dim: usize) -> Result<Vec<u8>, EmbedError> {
     if v.len() != dim {
@@ -33,6 +43,7 @@ pub fn pack_embedding(v: &[f32], dim: usize) -> Result<Vec<u8>, EmbedError> {
             got: v.len(),
         });
     }
+    reject_non_finite(v)?;
     let mut out = Vec::with_capacity(dim * 4);
     for &x in v {
         out.extend_from_slice(&x.to_le_bytes());
@@ -58,6 +69,7 @@ pub fn unpack_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>, EmbedError>
         let bytes: [u8; 4] = blob[start..start + 4].try_into().unwrap();
         v.push(f32::from_le_bytes(bytes));
     }
+    reject_non_finite(&v)?;
     Ok(l2_normalize(&v))
 }
 
@@ -68,6 +80,7 @@ pub fn mean_l2_embedding(vectors: &[Vec<f32>], dim: usize) -> Result<Vec<f32>, E
     }
     let mut acc = vec![0.0f32; dim];
     for v in vectors {
+        reject_non_finite(v)?;
         let n = l2_normalize(v);
         if n.len() != dim {
             return Err(EmbedError::WrongDim {
@@ -83,6 +96,7 @@ pub fn mean_l2_embedding(vectors: &[Vec<f32>], dim: usize) -> Result<Vec<f32>, E
     for x in &mut acc {
         *x /= count;
     }
+    reject_non_finite(&acc)?;
     Ok(l2_normalize(&acc))
 }
 

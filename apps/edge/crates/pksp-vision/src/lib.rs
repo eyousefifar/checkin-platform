@@ -1,11 +1,19 @@
 //! Vision: FaceEngine (mock | ort), gallery, capture, worker pipeline.
 
+mod align;
+mod scrfd;
 mod zones;
+
+pub use align::{align_arcface_bgr, AlignError};
+pub use scrfd::{
+    decode_scrfd, letterbox_bgr_to_nchw, levels_from_heads, stride_for_score_len, ScrfdError,
+    DEFAULT_SCORE_THRESH, NMS_IOU, STRIDES,
+};
 
 use pksp_core::{
     assign_tracks, commit_eligible, evaluate_vote, hud_state, l2_normalize, match_top1,
-    mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate, should_vote, track_zone,
-    trajectory_is_walkby, Detection, MatchResult, TrackerState, ZoneMap,
+    mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate_extended, should_vote,
+    track_zone, trajectory_is_walkby, Detection, MatchResult, TrackerState, ZoneMap,
 };
 use pksp_db::{bump_gallery_version, commit_identity, load_gallery_matrix, Settings};
 use serde_json::json;
@@ -30,11 +38,34 @@ pub struct DetectedFace {
     pub landmarks: Option<[[f32; 2]; 5]>,
 }
 
+/// Typed vision failure — never encode structural errors as an empty face list.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum FaceError {
+    #[error("engine not ready")]
+    NotReady,
+    #[error("invalid input frame")]
+    InvalidInput,
+    #[error("model / session failure: {0}")]
+    Model(String),
+    #[error("SCRFD decode: {0}")]
+    Decode(String),
+    #[error("alignment: {0}")]
+    Align(String),
+    #[error("recognition output invalid")]
+    BadEmbedding,
+}
+
 pub trait FaceEngine: Send + Sync {
     fn ready(&self) -> bool;
     fn model_name(&self) -> &str;
     fn execution_provider(&self) -> &str;
-    fn detect_and_embed(&self, width: u32, height: u32, bgr: &[u8]) -> Vec<DetectedFace>;
+    /// `Ok(vec![])` means successful inference with zero faces. Errors are structural.
+    fn detect_and_embed(
+        &self,
+        width: u32,
+        height: u32,
+        bgr: &[u8],
+    ) -> Result<Vec<DetectedFace>, FaceError>;
 }
 
 /// Deterministic mock engine — intensity bucket embeddings (parity with Python mock).
@@ -76,13 +107,18 @@ impl FaceEngine for MockFaceEngine {
     fn execution_provider(&self) -> &str {
         "mock"
     }
-    fn detect_and_embed(&self, width: u32, height: u32, bgr: &[u8]) -> Vec<DetectedFace> {
+    fn detect_and_embed(
+        &self,
+        width: u32,
+        height: u32,
+        bgr: &[u8],
+    ) -> Result<Vec<DetectedFace>, FaceError> {
         if width < 20 || height < 20 || bgr.is_empty() {
-            return vec![];
+            return Ok(vec![]);
         }
         let mean = bgr.iter().map(|&x| x as f32).sum::<f32>() / bgr.len() as f32;
         if mean < 5.0 {
-            return vec![];
+            return Ok(vec![]);
         }
         let margin = 0.15f32;
         let x1 = width as f32 * margin;
@@ -100,12 +136,12 @@ impl FaceEngine for MockFaceEngine {
             [cx - ew * 0.8, cy + (y2 - y1) * 0.15],
             [cx + ew * 0.8, cy + (y2 - y1) * 0.15],
         ]);
-        vec![DetectedFace {
+        Ok(vec![DetectedFace {
             bbox: (x1, y1, x2, y2),
             det_score: 0.99,
             embedding: self.vec_for_mean(mean),
             landmarks,
-        }]
+        }])
     }
 }
 
@@ -260,23 +296,17 @@ mod ort_sessions {
         Ok(provider)
     }
 
-    /// Full detect+embed — simplified SCRFD decode for common buffalo_l outputs.
+    /// Full detect+embed via pure SCRFD + ArcFace alignment modules.
     pub fn detect_and_embed(
         width: u32,
         height: u32,
         bgr: &[u8],
         det_size: i32,
-    ) -> Vec<DetectedFace> {
-        let Ok(mut g) = SESS.lock() else {
-            return vec![];
-        };
-        let Some(ref mut s) = *g else {
-            return vec![];
-        };
-        match run_pipeline(s, width, height, bgr, det_size) {
-            Ok(v) => v,
-            Err(_) => vec![],
-        }
+    ) -> Result<Vec<DetectedFace>, super::FaceError> {
+        use super::FaceError;
+        let mut g = SESS.lock().map_err(|e| FaceError::Model(e.to_string()))?;
+        let s = g.as_mut().ok_or(FaceError::NotReady)?;
+        run_pipeline(s, width, height, bgr, det_size)
     }
 
     fn run_pipeline(
@@ -285,150 +315,104 @@ mod ort_sessions {
         height: u32,
         bgr: &[u8],
         det_size: i32,
-    ) -> Result<Vec<DetectedFace>, String> {
+    ) -> Result<Vec<DetectedFace>, super::FaceError> {
+        use super::{align_arcface_bgr, FaceError};
+        use crate::scrfd::{
+            decode_scrfd, letterbox_bgr_to_nchw, levels_from_heads, DEFAULT_SCORE_THRESH, NMS_IOU,
+        };
+
+        if width == 0 || height == 0 || bgr.len() < (width * height * 3) as usize {
+            return Err(FaceError::InvalidInput);
+        }
         let ds = det_size as u32;
-        let (tensor, scale, pad_x, pad_y) = letterbox_bgr_to_nchw(bgr, width, height, ds);
+        let (tensor, meta) = letterbox_bgr_to_nchw(bgr, width, height, ds)
+            .map_err(|e| FaceError::Decode(e.to_string()))?;
         let input = ort::value::Tensor::from_array(([1usize, 3, ds as usize, ds as usize], tensor))
-            .map_err(|e| e.to_string())?;
-        let faces = {
-            let outputs = s.det.run(ort::inputs![input]).map_err(|e| e.to_string())?;
-            decode_scrfd_heuristic(&outputs, width, height, scale, pad_x, pad_y, ds)?
-        }; // drop SessionOutputs before rec borrow
-        let mut out = Vec::new();
-        for (bbox, score, kps) in faces {
-            if score < 0.5 {
-                continue;
+            .map_err(|e| FaceError::Model(e.to_string()))?;
+
+        // Collect score / bbox / kps heads by tensor length (names are export ids).
+        let mut score_bufs: Vec<Vec<f32>> = Vec::new();
+        let mut bbox_bufs: Vec<Vec<f32>> = Vec::new();
+        let mut kps_bufs: Vec<Vec<f32>> = Vec::new();
+        {
+            let outputs = s
+                .det
+                .run(ort::inputs![input])
+                .map_err(|e| FaceError::Model(e.to_string()))?;
+            for (_name, val) in outputs.iter() {
+                if let Ok((shape, data)) = val.try_extract_tensor::<f32>() {
+                    let shape: Vec<i64> = shape.iter().copied().collect();
+                    let flat: Vec<f32> = data.iter().copied().collect();
+                    if flat.iter().any(|v| !v.is_finite()) {
+                        return Err(FaceError::Decode("non-finite det tensor".into()));
+                    }
+                    // Classify by trailing dim / total length for buffalo_l
+                    let last = *shape.last().unwrap_or(&0);
+                    if last == 1 || shape.len() == 1 || (shape.len() == 2 && shape[1] == 1) {
+                        score_bufs.push(flat);
+                    } else if last == 4 {
+                        bbox_bufs.push(flat);
+                    } else if last == 10 {
+                        kps_bufs.push(flat);
+                    } else if flat.len() == 12800 || flat.len() == 3200 || flat.len() == 800 {
+                        score_bufs.push(flat);
+                    } else if flat.len() == 12800 * 4
+                        || flat.len() == 3200 * 4
+                        || flat.len() == 800 * 4
+                    {
+                        bbox_bufs.push(flat);
+                    } else if flat.len() == 12800 * 10
+                        || flat.len() == 3200 * 10
+                        || flat.len() == 800 * 10
+                    {
+                        kps_bufs.push(flat);
+                    }
+                }
             }
-            let emb = embed_face(s, bgr, width, height, bbox, kps)?;
+        }
+
+        if score_bufs.len() != 3 || bbox_bufs.len() != 3 || kps_bufs.len() != 3 {
+            return Err(FaceError::Decode(format!(
+                "expected 3 score/bbox/kps heads, got {}/{}/{}",
+                score_bufs.len(),
+                bbox_bufs.len(),
+                kps_bufs.len()
+            )));
+        }
+        let score_refs: Vec<&[f32]> = score_bufs.iter().map(|v| v.as_slice()).collect();
+        let bbox_refs: Vec<&[f32]> = bbox_bufs.iter().map(|v| v.as_slice()).collect();
+        let kps_refs: Vec<&[f32]> = kps_bufs.iter().map(|v| v.as_slice()).collect();
+        let levels = levels_from_heads(&score_refs, &bbox_refs, &kps_refs, ds)
+            .map_err(|e| FaceError::Decode(e.to_string()))?;
+        let faces = decode_scrfd(&levels, &meta, DEFAULT_SCORE_THRESH, NMS_IOU)
+            .map_err(|e| FaceError::Decode(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for f in faces {
+            let tensor = align_arcface_bgr(bgr, width, height, &f.landmarks)
+                .map_err(|e| FaceError::Align(e.to_string()))?;
+            let emb = embed_aligned(s, tensor)?;
             out.push(DetectedFace {
-                bbox,
-                det_score: score,
+                bbox: f.bbox,
+                det_score: f.score,
                 embedding: emb,
-                landmarks: kps,
+                landmarks: Some(f.landmarks),
             });
         }
         Ok(out)
     }
 
-    fn letterbox_bgr_to_nchw(bgr: &[u8], w: u32, h: u32, ds: u32) -> (Vec<f32>, f32, f32, f32) {
-        let scale = (ds as f32 / w as f32).min(ds as f32 / h as f32);
-        let nw = (w as f32 * scale).round() as u32;
-        let nh = (h as f32 * scale).round() as u32;
-        let pad_x = (ds as f32 - nw as f32) * 0.5;
-        let pad_y = (ds as f32 - nh as f32) * 0.5;
-        let mut out = vec![0.0f32; (3 * ds * ds) as usize];
-        // nearest-neighbor resize into letterbox, BGR→RGB, (x-127.5)/128
-        for y in 0..nh {
-            for x in 0..nw {
-                let sx = ((x as f32 / scale) as u32).min(w - 1);
-                let sy = ((y as f32 / scale) as u32).min(h - 1);
-                let si = ((sy * w + sx) * 3) as usize;
-                let dx = (x as f32 + pad_x) as u32;
-                let dy = (y as f32 + pad_y) as u32;
-                if dx >= ds || dy >= ds {
-                    continue;
-                }
-                let di = (dy * ds + dx) as usize;
-                let b = bgr[si] as f32;
-                let g = bgr[si + 1] as f32;
-                let r = bgr[si + 2] as f32;
-                // NCHW RGB
-                out[0 * (ds * ds) as usize + di] = (r - 127.5) / 128.0;
-                out[1 * (ds * ds) as usize + di] = (g - 127.5) / 128.0;
-                out[2 * (ds * ds) as usize + di] = (b - 127.5) / 128.0;
-            }
-        }
-        (out, scale, pad_x, pad_y)
-    }
-
-    fn decode_scrfd_heuristic(
-        outputs: &ort::session::SessionOutputs,
-        orig_w: u32,
-        orig_h: u32,
-        scale: f32,
-        pad_x: f32,
-        pad_y: f32,
-        _ds: u32,
-    ) -> Result<Vec<((f32, f32, f32, f32), f32, Option<[[f32; 2]; 5]>)>, String> {
-        // Collect all f32 outputs; pick the densest score-like map.
-        // This is intentionally resilient across SCRFD export variants.
-        let mut best: Option<((f32, f32, f32, f32), f32, Option<[[f32; 2]; 5]>)> = None;
-        for (_name, val) in outputs.iter() {
-            if let Ok((shape, data)) = val.try_extract_tensor::<f32>() {
-                let shape: Vec<i64> = shape.iter().copied().collect();
-                // score maps often 1x1xHxW or 1xHxW
-                if data.iter().any(|v| *v > 0.5) {
-                    // find argmax
-                    let (idx, &sc) = data
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .unwrap();
-                    if sc < 0.5 {
-                        continue;
-                    }
-                    // approximate center of letterbox cell → original
-                    let n = data.len().max(1);
-                    let side = (n as f32).sqrt() as usize;
-                    let y = if side > 0 { idx / side } else { 0 };
-                    let x = if side > 0 { idx % side } else { 0 };
-                    let cx_lb = x as f32 + 0.5;
-                    let cy_lb = y as f32 + 0.5;
-                    // scale coords if map size known poorly — use relative
-                    let fx = (cx_lb / side.max(1) as f32) * _ds as f32;
-                    let fy = (cy_lb / side.max(1) as f32) * _ds as f32;
-                    let ox = ((fx - pad_x) / scale).clamp(0.0, orig_w as f32 - 1.0);
-                    let oy = ((fy - pad_y) / scale).clamp(0.0, orig_h as f32 - 1.0);
-                    let face_w = (orig_w as f32 * 0.25).max(60.0);
-                    let face_h = face_w * 1.2;
-                    let bbox = (
-                        (ox - face_w * 0.5).max(0.0),
-                        (oy - face_h * 0.5).max(0.0),
-                        (ox + face_w * 0.5).min(orig_w as f32),
-                        (oy + face_h * 0.5).min(orig_h as f32),
-                    );
-                    if best.as_ref().map(|b| b.1).unwrap_or(0.0) < sc {
-                        best = Some((bbox, sc, None));
-                    }
-                }
-                let _ = shape;
-            }
-        }
-        Ok(best.into_iter().collect())
-    }
-
-    fn embed_face(
-        s: &mut Sessions,
-        bgr: &[u8],
-        width: u32,
-        height: u32,
-        bbox: (f32, f32, f32, f32),
-        _kps: Option<[[f32; 2]; 5]>,
-    ) -> Result<Vec<f32>, String> {
-        // Crop bbox → 112x112 RGB normalized ArcFace style
-        let (x1, y1, x2, y2) = bbox;
-        let mut tensor = vec![0.0f32; 3 * 112 * 112];
-        for yy in 0..112u32 {
-            for xx in 0..112u32 {
-                let sx = (x1 + (x2 - x1) * (xx as f32 / 111.0))
-                    .round()
-                    .clamp(0.0, width as f32 - 1.0) as u32;
-                let sy = (y1 + (y2 - y1) * (yy as f32 / 111.0))
-                    .round()
-                    .clamp(0.0, height as f32 - 1.0) as u32;
-                let si = ((sy * width + sx) * 3) as usize;
-                let b = bgr[si] as f32;
-                let gch = bgr[si + 1] as f32;
-                let r = bgr[si + 2] as f32;
-                let di = (yy * 112 + xx) as usize;
-                tensor[0 * 112 * 112 + di] = (r - 127.5) / 127.5;
-                tensor[1 * 112 * 112 + di] = (gch - 127.5) / 127.5;
-                tensor[2 * 112 * 112 + di] = (b - 127.5) / 127.5;
-            }
+    fn embed_aligned(s: &mut Sessions, tensor: Vec<f32>) -> Result<Vec<f32>, super::FaceError> {
+        use super::FaceError;
+        if tensor.len() != 3 * 112 * 112 || tensor.iter().any(|v| !v.is_finite()) {
+            return Err(FaceError::BadEmbedding);
         }
         let input = ort::value::Tensor::from_array(([1usize, 3, 112, 112], tensor))
-            .map_err(|e| e.to_string())?;
-        let outputs = s.rec.run(ort::inputs![input]).map_err(|e| e.to_string())?;
+            .map_err(|e| FaceError::Model(e.to_string()))?;
+        let outputs = s
+            .rec
+            .run(ort::inputs![input])
+            .map_err(|e| FaceError::Model(e.to_string()))?;
         let mut emb_out: Option<Vec<f32>> = None;
         for (_name, val) in outputs.iter() {
             if let Ok((_shape, data)) = val.try_extract_tensor::<f32>() {
@@ -436,7 +420,10 @@ mod ort_sessions {
                 break;
             }
         }
-        let emb = emb_out.ok_or_else(|| "no rec output".to_string())?;
+        let emb = emb_out.ok_or(FaceError::BadEmbedding)?;
+        if emb.len() != 512 || emb.iter().any(|v| !v.is_finite()) {
+            return Err(FaceError::BadEmbedding);
+        }
         Ok(l2_normalize(&emb))
     }
 }
@@ -451,9 +438,9 @@ impl FaceEngine for OrtFaceEngine {
     fn execution_provider(&self) -> &str {
         &self.provider
     }
-    fn detect_and_embed(&self, w: u32, h: u32, bgr: &[u8]) -> Vec<DetectedFace> {
+    fn detect_and_embed(&self, w: u32, h: u32, bgr: &[u8]) -> Result<Vec<DetectedFace>, FaceError> {
         if !self.ready {
-            return vec![];
+            return Err(FaceError::NotReady);
         }
         #[cfg(feature = "ort")]
         {
@@ -462,7 +449,7 @@ impl FaceEngine for OrtFaceEngine {
         #[cfg(not(feature = "ort"))]
         {
             let _ = (w, h, bgr, self.det_size);
-            vec![]
+            Err(FaceError::NotReady)
         }
     }
 }
@@ -910,7 +897,14 @@ async fn infer_frame(
     metrics: &Arc<RwLock<VisionMetrics>>,
 ) -> Vec<serde_json::Value> {
     let raw = if engine.ready() {
-        engine.detect_and_embed(w, h, bgr)
+        match engine.detect_and_embed(w, h, bgr) {
+            Ok(v) => v,
+            Err(e) => {
+                // Structural model errors: log sanitized message; do not treat as empty success.
+                warn!(camera_id = %camera_id, error = %e, "detect_and_embed failed");
+                vec![]
+            }
+        }
     } else {
         vec![]
     };
@@ -927,7 +921,8 @@ async fn infer_frame(
         let g = gallery.read().unwrap();
         let mut dets = Vec::new();
         for f in raw {
-            let q = quality_gate(
+            let gray = crop_gray_luma(bgr, w, h, f.bbox);
+            let q = quality_gate_extended(
                 f.det_score,
                 f.bbox,
                 settings.min_det_score,
@@ -935,6 +930,12 @@ async fn infer_frame(
                 w as i32,
                 h as i32,
                 false,
+                f.landmarks.as_ref(),
+                gray.as_ref().map(|(g, gw, gh)| (g.as_slice(), *gw, *gh)),
+                settings.pose_max_yaw,
+                settings.blur_min_var,
+                0.0,
+                255.0, // exposure disabled unless settings expose bounds
             );
             let bbox_n = (
                 f.bbox.0 / w as f32,
@@ -1091,6 +1092,38 @@ async fn infer_frame(
     out
 }
 
+/// Crop bbox to grayscale luma for blur/exposure quality extensions.
+fn crop_gray_luma(
+    bgr: &[u8],
+    w: u32,
+    h: u32,
+    bbox: (f32, f32, f32, f32),
+) -> Option<(Vec<u8>, usize, usize)> {
+    let x1 = bbox.0.max(0.0).floor() as u32;
+    let y1 = bbox.1.max(0.0).floor() as u32;
+    let x2 = bbox.2.min(w as f32).ceil() as u32;
+    let y2 = bbox.3.min(h as f32).ceil() as u32;
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    let cw = (x2 - x1) as usize;
+    let ch = (y2 - y1) as usize;
+    let mut gray = Vec::with_capacity(cw * ch);
+    for y in y1..y2 {
+        for x in x1..x2 {
+            let i = ((y * w + x) * 3) as usize;
+            if i + 2 >= bgr.len() {
+                return None;
+            }
+            let b = bgr[i] as f32;
+            let g = bgr[i + 1] as f32;
+            let r = bgr[i + 2] as f32;
+            gray.push((0.114 * b + 0.587 * g + 0.299 * r) as u8);
+        }
+    }
+    Some((gray, cw, ch))
+}
+
 /// Enroll images using FaceEngine (mock-safe).
 pub async fn enroll_images(
     pool: &SqlitePool,
@@ -1117,7 +1150,17 @@ pub async fn enroll_images(
                     bgr.push(p[1]);
                     bgr.push(p[0]);
                 }
-                let faces = engine.detect_and_embed(w, h, &bgr);
+                let faces = match engine.detect_and_embed(w, h, &bgr) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return Ok(json!({
+                            "ok": false,
+                            "error": e.to_string(),
+                            "usable": 0,
+                            "rejected": [],
+                        }));
+                    }
+                };
                 if faces.is_empty() {
                     (None, Some("no_face".to_string()))
                 } else {
@@ -1128,7 +1171,8 @@ pub async fn enroll_images(
                         bb.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let face = &faces[0];
-                    let q = quality_gate(
+                    let gray = crop_gray_luma(&bgr, w, h, face.bbox);
+                    let q = quality_gate_extended(
                         face.det_score,
                         face.bbox,
                         settings.min_det_score,
@@ -1136,6 +1180,12 @@ pub async fn enroll_images(
                         w as i32,
                         h as i32,
                         false,
+                        face.landmarks.as_ref(),
+                        gray.as_ref().map(|(g, gw, gh)| (g.as_slice(), *gw, *gh)),
+                        settings.pose_max_yaw,
+                        settings.blur_min_var,
+                        0.0,
+                        255.0,
                     );
                     if !q.ok {
                         (None, q.reason)
