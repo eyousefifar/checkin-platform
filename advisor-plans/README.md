@@ -26,7 +26,7 @@ open a pull request unless the operator explicitly asks.
 | 011 | Apply `APP_TIMEZONE` to dates, times, and CSV | P1 | M | 001, 010 | DONE |
 | 012 | Make employee creation and photo review recoverable | P1 | M | 001, 006 | DONE |
 | 013 | Make browser video state truthful and retryable | P1 | M | 001, 007, 008, 011 | DONE |
-| 014 | Restore responsive and accessible operational UI | P2 | M | 001, 012, 013, 015, 016, 017, 018 | TODO |
+| 014 | Restore responsive and accessible operational UI | P2 | M | 001, 012, 013, 015, 016, 017, 018 | DONE |
 | 015 | Remove low-cost frontend and employee-list hot spots | P2 | S | 001 | DONE |
 | 016 | Render the one-or-two-camera wall from health | P2 | M | 007, 008, 013 | DONE |
 | 017 | Add attendance explainability before analytics | P2 | M | 009, 011, 016 | DONE |

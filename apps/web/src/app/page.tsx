@@ -33,9 +33,9 @@ export default function DashboardPage() {
       : undefined;
 
   return (
-    <div className="dashboard-grid min-h-[calc(100vh-7rem)] p-6">
-      <div className="mb-4 flex items-end justify-between">
-        <div>
+    <div className="dashboard-grid min-h-[calc(100vh-7rem)] min-w-0 p-4 md:p-6">
+      <div className="mb-4 flex min-w-0 flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold uppercase tracking-wide text-ink">
             Live operations
           </h1>
@@ -43,19 +43,24 @@ export default function DashboardPage() {
             On-prem vision · WebSocket HUD · no cloud face APIs
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {(healthRetrying || healthError) && (
             <div
-              className="text-[11px] font-bold uppercase tracking-label text-warning"
+              className="text-xs font-bold uppercase tracking-label text-warning"
               data-testid="health-retrying"
+              role="status"
+              aria-live="polite"
             >
               {healthError ? `Health retrying · ${healthError}` : "Health retrying…"}
             </div>
           )}
           <div
-            className={`text-[11px] font-bold uppercase tracking-label ${
+            className={`text-xs font-bold uppercase tracking-label ${
               connected ? "text-success" : "text-warning"
             }`}
+            role="status"
+            aria-live="polite"
+            data-testid="ws-connection-status"
           >
             {connected ? "WS linked" : "WS reconnecting…"}
           </div>

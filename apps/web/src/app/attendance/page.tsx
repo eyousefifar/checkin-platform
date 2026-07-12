@@ -144,10 +144,15 @@ export default function AttendancePage() {
   const waitingForHealth = healthLoading && !timezone;
   const zone = timezone ?? "UTC";
 
+  const showDailyLoading = loading;
+  const showDailyError = !loading && Boolean(error);
+  const showDailyEmpty = !loading && !error && filtered.length === 0;
+  const showDailyRows = !loading && !error && filtered.length > 0;
+
   return (
-    <div className="p-6">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
+    <div className="min-w-0 p-4 md:p-6">
+      <div className="mb-6 flex min-w-0 flex-wrap items-end justify-between gap-4">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold uppercase tracking-wide text-ink">
             Attendance
           </h1>
@@ -157,7 +162,7 @@ export default function AttendancePage() {
           type="button"
           onClick={() => void exportCsv()}
           disabled={!date}
-          className="border border-ink px-6 py-3 text-xs font-bold uppercase tracking-label text-ink hover:bg-elevated disabled:opacity-40"
+          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-40"
         >
           Export CSV
         </button>
@@ -166,46 +171,55 @@ export default function AttendancePage() {
       {waitingForHealth && (
         <div
           data-testid="attendance-health-loading"
-          className="mb-4 border border-hairline bg-card px-4 py-6 text-sm text-muted"
+          className="mb-4 border border-hairline bg-card px-4 py-6 text-sm text-body"
+          role="status"
         >
           Loading attendance calendar timezone…
         </div>
       )}
 
       {healthError && !timezone && (
-        <div className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red">
+        <div
+          className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
+          role="alert"
+        >
           Health unavailable: {healthError}. Retrying…
         </div>
       )}
 
       {timezone && date && (
         <>
-          <div className="mb-4 flex flex-wrap items-center gap-4">
-            <label className="text-[11px] font-bold uppercase tracking-label text-muted">
+          <div className="mb-4 flex min-w-0 flex-wrap items-center gap-4">
+            <label
+              htmlFor="attendance-date"
+              className="text-sm font-bold uppercase tracking-label text-body"
+            >
               Date
-              <input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="ml-2 border border-hairline bg-card px-2 py-1 font-mono text-sm text-ink"
-              />
             </label>
+            <input
+              id="attendance-date"
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="border border-hairline bg-card px-2 py-1 font-mono text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+            />
             <span
               data-testid="attendance-timezone"
-              className="font-mono text-xs text-muted"
+              className="font-mono text-xs text-body"
             >
               {timezone}
             </span>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Status filter">
               {chips.map((c) => (
                 <button
                   key={c}
                   type="button"
                   onClick={() => setStatus(c)}
-                  className={`border px-3 py-1 text-[10px] font-bold uppercase tracking-label ${
+                  aria-pressed={status === c}
+                  className={`border px-3 py-1 text-xs font-bold uppercase tracking-label focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark ${
                     status === c
                       ? "border-m-blue-dark text-ink"
-                      : "border-hairline text-muted hover:text-ink"
+                      : "border-hairline text-body hover:text-ink"
                   }`}
                 >
                   {c}
@@ -214,16 +228,17 @@ export default function AttendancePage() {
             </div>
           </div>
 
-          {error && (
+          {showDailyError && (
             <div
               className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
               role="alert"
+              data-testid="attendance-error"
             >
               {error}
             </div>
           )}
 
-          {eventsError && (
+          {eventsError && !showDailyError && (
             <div
               className="mb-4 border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
               role="status"
@@ -234,11 +249,31 @@ export default function AttendancePage() {
             </div>
           )}
 
-          <div className="overflow-x-auto border border-hairline">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-hairline bg-card text-[10px] uppercase tracking-label text-muted">
+          {showDailyLoading && (
+            <div
+              className="border border-hairline px-4 py-8 text-sm text-body"
+              role="status"
+              data-testid="attendance-loading"
+            >
+              Loading…
+            </div>
+          )}
+
+          {showDailyEmpty && (
+            <div
+              className="border border-hairline px-4 py-8 text-sm text-body"
+              data-testid="attendance-empty"
+            >
+              No rows for this day.
+            </div>
+          )}
+
+          {showDailyRows && (
+          <div className="min-w-0 overflow-x-auto border border-hairline">
+            <table className="w-full min-w-[40rem] text-left text-sm">
+              <thead className="border-b border-hairline bg-card text-xs uppercase tracking-label text-body">
                 <tr>
-                  <th className="px-4 py-3 w-12">
+                  <th className="w-12 px-4 py-3">
                     <span className="sr-only">Details</span>
                   </th>
                   <th className="px-4 py-3">Code</th>
@@ -251,22 +286,7 @@ export default function AttendancePage() {
                 </tr>
               </thead>
               <tbody>
-                {loading && (
-                  <tr>
-                    <td colSpan={8} className="px-4 py-8 text-muted">
-                      Loading…
-                    </td>
-                  </tr>
-                )}
-                {!loading && filtered.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="px-4 py-8 text-muted">
-                      No rows for this day.
-                    </td>
-                  </tr>
-                )}
-                {!loading &&
-                  filtered.map((r) => {
+                {filtered.map((r) => {
                     const isOpen = expanded.has(r.employee_id);
                     const detailId = `attendance-detail-${r.employee_id}`;
                     const rowEvents = eventsByEmployee.get(r.employee_id) ?? [];
@@ -280,7 +300,7 @@ export default function AttendancePage() {
                               aria-expanded={isOpen}
                               aria-controls={detailId}
                               onClick={() => toggleExpand(r.employee_id)}
-                              className="border border-hairline px-2 py-1 text-[10px] font-bold uppercase tracking-label text-body hover:text-ink"
+                              className="border border-hairline px-2 py-1 text-xs font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
                               data-testid={`expand-${r.employee_id}`}
                             >
                               {isOpen ? "Hide" : "Events"}
@@ -380,6 +400,7 @@ export default function AttendancePage() {
               </tbody>
             </table>
           </div>
+          )}
         </>
       )}
     </div>

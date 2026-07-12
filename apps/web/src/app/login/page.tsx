@@ -32,7 +32,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-[calc(100vh-7rem)] items-center justify-center p-6">
+    <div className="flex min-h-[calc(100vh-7rem)] min-w-0 items-center justify-center p-4 md:p-6">
       <form
         onSubmit={onSubmit}
         className="w-full max-w-sm border border-hairline bg-card p-8"
@@ -41,21 +41,29 @@ export default function LoginPage() {
           Admin login
         </h1>
         <p className="mt-2 text-sm text-body">LAN MVP · shared password</p>
-        <label className="mt-6 block text-[11px] font-bold uppercase tracking-label text-muted">
+        <label
+          htmlFor="login-password"
+          className="mt-6 block text-sm font-bold uppercase tracking-label text-body"
+        >
           Password
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="mt-2 w-full border border-hairline bg-soft px-3 py-2 text-sm text-ink outline-none focus:border-m-blue-dark"
-            autoFocus
-          />
         </label>
-        {error && <p className="mt-3 text-sm text-m-red">{error}</p>}
+        <input
+          id="login-password"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="mt-2 w-full border border-hairline bg-soft px-3 py-2 text-sm text-ink outline-none focus:border-m-blue-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+          autoFocus
+        />
+        {error && (
+          <p className="mt-3 text-sm text-m-red" role="alert">
+            {error}
+          </p>
+        )}
         <button
           type="submit"
           disabled={loading}
-          className="mt-6 w-full border border-ink bg-canvas py-3 text-xs font-bold uppercase tracking-label text-ink hover:bg-elevated disabled:opacity-50"
+          className="mt-6 w-full border border-ink bg-canvas py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
         >
           {loading ? "…" : "Sign in"}
         </button>

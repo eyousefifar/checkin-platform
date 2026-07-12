@@ -172,8 +172,11 @@ export default function EmployeeDetailPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl p-6">
-      <Link href="/employees" className="text-xs uppercase tracking-label text-muted hover:text-ink">
+    <div className="mx-auto min-w-0 max-w-2xl p-4 md:p-6">
+      <Link
+        href="/employees"
+        className="text-sm uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+      >
         ← Employees
       </Link>
       {error && (
@@ -204,13 +207,13 @@ export default function EmployeeDetailPage() {
             className="mt-6 space-y-3 border border-hairline bg-card p-4"
             data-testid="profile-form"
           >
-            <h2 className="text-[11px] font-bold uppercase tracking-label text-muted">
+            <h2 className="text-sm font-bold uppercase tracking-label text-body">
               Profile
             </h2>
             <div>
               <label
                 htmlFor="employee-code"
-                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+                className="block text-sm font-bold uppercase tracking-label text-body"
               >
                 Employee code
               </label>
@@ -227,7 +230,7 @@ export default function EmployeeDetailPage() {
             <div>
               <label
                 htmlFor="full-name"
-                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+                className="block text-sm font-bold uppercase tracking-label text-body"
               >
                 Full name
               </label>
@@ -245,7 +248,7 @@ export default function EmployeeDetailPage() {
             <div>
               <label
                 htmlFor="department"
-                className="block text-[11px] font-bold uppercase tracking-label text-muted"
+                className="block text-sm font-bold uppercase tracking-label text-body"
               >
                 Department
               </label>
@@ -276,7 +279,7 @@ export default function EmployeeDetailPage() {
             <button
               type="submit"
               disabled={busy}
-              className="border border-ink px-4 py-2 text-xs font-bold uppercase tracking-label hover:bg-elevated disabled:opacity-50"
+              className="border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
               data-testid="save-profile"
             >
               Save profile
@@ -284,7 +287,7 @@ export default function EmployeeDetailPage() {
           </form>
 
           <div className="mt-6 border border-hairline bg-card p-4">
-            <h2 className="text-[11px] font-bold uppercase tracking-label text-muted">
+            <h2 className="text-sm font-bold uppercase tracking-label text-body">
               Images ({emp.image_count})
             </h2>
             <ul className="mt-2 space-y-1 font-mono text-xs text-body" data-testid="image-list">
@@ -301,22 +304,26 @@ export default function EmployeeDetailPage() {
           </div>
 
           <form onSubmit={upload} className="mt-6 space-y-3">
-            <label className="block text-[11px] font-bold uppercase tracking-label text-muted">
+            <label
+              htmlFor="detail-files"
+              className="block text-sm font-bold uppercase tracking-label text-body"
+            >
               Upload face images
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => setFiles(e.target.files)}
-                className="mt-2 block text-sm font-normal normal-case tracking-normal text-body"
-                data-testid="detail-files"
-              />
             </label>
-            <div className="flex gap-3">
+            <input
+              id="detail-files"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => setFiles(e.target.files)}
+              className="mt-2 block text-sm font-normal normal-case tracking-normal text-body"
+              data-testid="detail-files"
+            />
+            <div className="flex flex-wrap gap-3">
               <button
                 type="submit"
                 disabled={busy}
-                className="border border-ink px-4 py-2 text-xs font-bold uppercase tracking-label hover:bg-elevated disabled:opacity-50"
+                className="border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
                 data-testid="upload-images"
               >
                 Upload images
@@ -325,7 +332,7 @@ export default function EmployeeDetailPage() {
                 type="button"
                 onClick={recompute}
                 disabled={busy}
-                className="border border-hairline px-4 py-2 text-xs font-bold uppercase tracking-label text-body hover:text-ink disabled:opacity-50"
+                className="border border-hairline px-4 py-2 text-sm font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
                 data-testid="recompute-embedding"
               >
                 Recompute embedding

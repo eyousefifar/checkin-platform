@@ -109,8 +109,11 @@ export default function NewEmployeePage() {
   }, [uploadResult]);
 
   return (
-    <div className="mx-auto max-w-xl p-6">
-      <Link href="/employees" className="text-xs uppercase tracking-label text-muted hover:text-ink">
+    <div className="mx-auto min-w-0 max-w-xl p-4 md:p-6">
+      <Link
+        href="/employees"
+        className="text-sm uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+      >
         ← Employees
       </Link>
       <h1 className="mt-4 text-2xl font-bold uppercase tracking-wide text-ink">
@@ -118,7 +121,7 @@ export default function NewEmployeePage() {
       </h1>
 
       <div className="mt-4 border border-hairline bg-card p-4 text-sm text-body">
-        <p className="text-[11px] font-bold uppercase tracking-label text-muted">
+        <p className="text-sm font-bold uppercase tracking-label text-body">
           Photo guidance
         </p>
         <ul className="mt-2 list-inside list-disc space-y-1 text-xs">
@@ -134,7 +137,11 @@ export default function NewEmployeePage() {
           </p>
           <p className="text-sm text-body">
             Open the detail page to review or retry photos:{" "}
-            <Link href={detailHref} className="text-m-blue-light underline" data-testid="detail-link">
+            <Link
+              href={detailHref}
+              className="text-ink underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+              data-testid="detail-link"
+            >
               Employee #{createdId}
             </Link>
           </p>
@@ -210,18 +217,22 @@ export default function NewEmployeePage() {
           onChange={setDept}
           disabled={created || busy}
         />
-        <label className="block text-[11px] font-bold uppercase tracking-label text-muted">
+        <label
+          htmlFor="face-files"
+          className="block text-sm font-bold uppercase tracking-label text-body"
+        >
           Face images
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            disabled={created || busy}
-            onChange={(e) => onFilesChange(e.target.files)}
-            className="mt-2 block w-full text-sm text-body disabled:opacity-50"
-            data-testid="face-files"
-          />
         </label>
+        <input
+          id="face-files"
+          type="file"
+          accept="image/*"
+          multiple
+          disabled={created || busy}
+          onChange={(e) => onFilesChange(e.target.files)}
+          className="mt-2 block w-full text-sm text-body disabled:opacity-50"
+          data-testid="face-files"
+        />
 
         {selected.length > 0 && (
           <ul
@@ -237,7 +248,7 @@ export default function NewEmployeePage() {
                   alt=""
                   className="h-16 w-16 border border-hairline object-cover"
                 />
-                <p className="truncate font-mono text-[10px] text-body" title={s.file.name}>
+                <p className="truncate font-mono text-xs text-body" title={s.file.name}>
                   {s.file.name}
                 </p>
               </li>
@@ -254,7 +265,7 @@ export default function NewEmployeePage() {
         <button
           type="submit"
           disabled={busy || created}
-          className="border border-ink px-6 py-3 text-xs font-bold uppercase tracking-label text-ink hover:bg-elevated disabled:opacity-50"
+          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
           data-testid="save-employee"
         >
           {busy ? "Saving…" : created ? "Created" : "Save"}
@@ -278,14 +289,14 @@ function Field({
   disabled?: boolean;
 }) {
   return (
-    <label className="block text-[11px] font-bold uppercase tracking-label text-muted">
+    <label className="block text-sm font-bold uppercase tracking-label text-body">
       {label}
       <input
         value={value}
         required={required}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-2 w-full border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-m-blue-dark disabled:opacity-50"
+        className="mt-2 w-full border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-m-blue-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
       />
     </label>
   );

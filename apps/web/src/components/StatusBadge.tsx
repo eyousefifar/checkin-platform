@@ -9,7 +9,7 @@ export function StatusBadge({ status }: { status: string }) {
   const cls = STYLES[status] || STYLES.absent;
   return (
     <span
-      className={`inline-block border px-2 py-0.5 text-[10px] font-bold uppercase tracking-label ${cls}`}
+      className={`inline-block border px-2 py-0.5 text-xs font-bold uppercase tracking-label ${cls}`}
     >
       {status}
     </span>

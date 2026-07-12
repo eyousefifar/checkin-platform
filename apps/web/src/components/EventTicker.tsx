@@ -20,7 +20,7 @@ export function EventTicker({
 }) {
   return (
     <div className="flex h-full flex-col border border-hairline bg-card">
-      <div className="border-b border-hairline px-4 py-3 text-[11px] font-bold uppercase tracking-label text-muted">
+      <div className="border-b border-hairline px-4 py-3 text-xs font-bold uppercase tracking-label text-body">
         Event ticker
       </div>
       <ul
@@ -31,7 +31,7 @@ export function EventTicker({
         data-testid="event-ticker-list"
       >
         {events.length === 0 && (
-          <li className="text-muted">Waiting for live events…</li>
+          <li className="text-body">Waiting for live events…</li>
         )}
         {events.map((e, i) => (
           <li
@@ -44,7 +44,7 @@ export function EventTicker({
               <span className={`ml-2 uppercase ${kindColor(e.kind)}`}>
                 {e.kind.replace("_", "-")}
               </span>
-              <div className="mt-0.5 text-[11px] text-muted">
+              <div className="mt-0.5 text-xs text-body">
                 <span data-testid="event-ticker-time">
                   {timeFromEpochSeconds(e.ts, timezone)}
                 </span>
@@ -52,7 +52,7 @@ export function EventTicker({
                 <span data-testid="event-ticker-camera">{e.camera_id}</span>
               </div>
             </div>
-            <span className="shrink-0 text-muted">
+            <span className="shrink-0 text-body">
               {e.score?.toFixed?.(2) ?? "—"}
             </span>
           </li>

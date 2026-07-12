@@ -210,8 +210,12 @@ export function CameraTile({
 
       {!showVideo && (
         <div className="absolute inset-0 z-[1] flex items-center justify-center bg-gradient-to-b from-[#0a0a0a] to-[#111]">
-          <div className="text-center px-4">
-            <div className="font-mono text-[10px] uppercase tracking-label text-muted">
+          <div className="px-4 text-center">
+            <div
+              className="font-mono text-xs uppercase tracking-label text-body"
+              role="status"
+              aria-live="polite"
+            >
               {!webrtcPath
                 ? "Health retrying · waiting for stream path"
                 : online === true
@@ -224,12 +228,12 @@ export function CameraTile({
               {webrtcPath ? `${webrtcBase}/${webrtcPath}` : "path pending"}
             </div>
             <div
-              className="mt-2 font-mono text-[10px] text-muted"
+              className="mt-2 font-mono text-xs text-body"
               data-testid="video-status-text"
             >
               WHEP · {videoError || (videoState === "connecting" ? "connecting…" : videoState)}
             </div>
-            <div className="mt-3 text-[10px] text-muted">
+            <div className="mt-3 text-xs text-body">
               Canvas HUD from WS · video via MediaMTX when stream is live
             </div>
           </div>
@@ -238,22 +242,22 @@ export function CameraTile({
 
       <FaceHudCanvas faces={faces} width={size.w} height={size.h} />
 
-      <div className="absolute left-3 top-3 z-30 flex items-center gap-2">
-        <span className="bg-black/70 px-2 py-1 text-[10px] font-bold uppercase tracking-label text-ink">
+      <div className="absolute left-3 top-3 z-30 flex flex-wrap items-center gap-2">
+        <span className="bg-black/70 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
           {name}
         </span>
-        <span className="bg-black/70 px-2 py-1 text-[10px] uppercase tracking-label text-m-blue-light">
+        <span className="border border-m-blue-dark/60 bg-black/70 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
           {direction}
         </span>
       </div>
-      <div className="absolute right-3 top-3 z-30 flex items-center gap-2">
+      <div className="absolute right-3 top-3 z-30 flex flex-wrap items-center justify-end gap-2">
         <span
-          className={`px-2 py-1 text-[10px] font-bold uppercase tracking-label ${
+          className={`px-2 py-1 text-xs font-bold uppercase tracking-label ${
             online === true
               ? "bg-success/20 text-success"
               : online === false
                 ? "bg-m-red/20 text-m-red"
-                : "bg-black/70 text-muted"
+                : "bg-black/70 text-body"
           }`}
           data-camera-status={cameraStatus}
           data-testid="camera-capture-badge"
@@ -261,12 +265,12 @@ export function CameraTile({
           {cameraLabel}
         </span>
         <span
-          className={`px-2 py-1 text-[10px] font-bold uppercase tracking-label ${
+          className={`px-2 py-1 text-xs font-bold uppercase tracking-label ${
             videoState === "playing"
               ? "bg-success/20 text-success"
               : videoState === "error"
                 ? "bg-m-red/20 text-m-red"
-                : "bg-black/70 text-muted"
+                : "bg-black/70 text-body"
           }`}
           data-testid="browser-video-badge"
           data-video-badge={videoState}
@@ -274,7 +278,7 @@ export function CameraTile({
           {videoLabel}
         </span>
         {fps != null && (
-          <span className="bg-black/70 px-2 py-1 font-mono text-[10px] text-muted">
+          <span className="bg-black/70 px-2 py-1 font-mono text-xs text-body">
             {fps.toFixed(1)} FPS
           </span>
         )}
