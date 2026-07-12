@@ -169,7 +169,11 @@ fn try_init_ort(
     // ort sessions are initialized lazily on first detect when feature available.
     // Without the ort crate linked, we report unavailable so MOCK remains safe.
     if std::env::var("PKSP_FORCE_ORT_READY").as_deref() == Ok("1") {
-        return Ok(providers.split(',').next().unwrap_or("CPUExecutionProvider").to_string());
+        return Ok(providers
+            .split(',')
+            .next()
+            .unwrap_or("CPUExecutionProvider")
+            .to_string());
     }
     // Real ort path: implemented in engine_ort module when dependency present.
     ort_runtime::try_load(model_dir, providers)
@@ -219,7 +223,9 @@ mod ort_sessions {
     pub struct Sessions {
         pub det: ort::session::Session,
         pub rec: ort::session::Session,
+        #[allow(dead_code)]
         pub det_size: i32,
+        #[allow(dead_code)]
         pub provider: String,
     }
 
@@ -255,7 +261,12 @@ mod ort_sessions {
     }
 
     /// Full detect+embed — simplified SCRFD decode for common buffalo_l outputs.
-    pub fn detect_and_embed(width: u32, height: u32, bgr: &[u8], det_size: i32) -> Vec<DetectedFace> {
+    pub fn detect_and_embed(
+        width: u32,
+        height: u32,
+        bgr: &[u8],
+        det_size: i32,
+    ) -> Vec<DetectedFace> {
         let Ok(mut g) = SESS.lock() else {
             return vec![];
         };
@@ -280,10 +291,7 @@ mod ort_sessions {
         let input = ort::value::Tensor::from_array(([1usize, 3, ds as usize, ds as usize], tensor))
             .map_err(|e| e.to_string())?;
         let faces = {
-            let outputs = s
-                .det
-                .run(ort::inputs![input])
-                .map_err(|e| e.to_string())?;
+            let outputs = s.det.run(ort::inputs![input]).map_err(|e| e.to_string())?;
             decode_scrfd_heuristic(&outputs, width, height, scale, pad_x, pad_y, ds)?
         }; // drop SessionOutputs before rec borrow
         let mut out = Vec::new();
@@ -302,12 +310,7 @@ mod ort_sessions {
         Ok(out)
     }
 
-    fn letterbox_bgr_to_nchw(
-        bgr: &[u8],
-        w: u32,
-        h: u32,
-        ds: u32,
-    ) -> (Vec<f32>, f32, f32, f32) {
+    fn letterbox_bgr_to_nchw(bgr: &[u8], w: u32, h: u32, ds: u32) -> (Vec<f32>, f32, f32, f32) {
         let scale = (ds as f32 / w as f32).min(ds as f32 / h as f32);
         let nw = (w as f32 * scale).round() as u32;
         let nh = (h as f32 * scale).round() as u32;
@@ -518,20 +521,11 @@ pub async fn reload_gallery(
     Ok(())
 }
 
+#[derive(Default)]
 pub struct VisionMetrics {
     pub online: HashMap<String, bool>,
     pub fps: HashMap<String, f64>,
     pub events_today: u64,
-}
-
-impl Default for VisionMetrics {
-    fn default() -> Self {
-        Self {
-            online: HashMap::new(),
-            fps: HashMap::new(),
-            events_today: 0,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -577,17 +571,8 @@ pub fn start_vision_worker(
         let cam = cam_id.clone();
         tokio::spawn(async move {
             process_loop(
-                cam,
-                rtsp,
-                stop_c,
-                pool_c,
-                settings_c,
-                engine_c,
-                gallery_c,
-                tx_c,
-                metrics_c,
-                zones_c,
-                sem,
+                cam, rtsp, stop_c, pool_c, settings_c, engine_c, gallery_c, tx_c, metrics_c,
+                zones_c, sem,
             )
             .await;
         });
@@ -620,6 +605,10 @@ pub fn start_mock_worker(
     )
 }
 
+// Shared latest BGR frame: (width, height, pixels, captured_at)
+type LatestFrame = Arc<RwLock<Option<(u32, u32, Vec<u8>, Instant)>>>;
+
+#[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 async fn process_loop(
     camera_id: String,
     rtsp_url: String,
@@ -639,11 +628,13 @@ async fn process_loop(
     let mut fps_t0 = Instant::now();
     let mut target_fps = settings.vision_target_fps.max(0.5);
     let mut last_gallery_ver: u64 = gallery.read().unwrap().version;
+    // Seed overwritten on first frame; elapsed used for freeze/offline detection.
+    #[allow(unused_assignments)]
     let mut last_frame_ts = Instant::now();
     let use_rtsp = !settings.mock_vision && !rtsp_url.is_empty() && engine.ready();
 
     // Shared latest frame for RTSP path
-    let latest: Arc<RwLock<Option<(u32, u32, Vec<u8>, Instant)>>> = Arc::new(RwLock::new(None));
+    let latest: LatestFrame = Arc::new(RwLock::new(None));
     if use_rtsp {
         let stop_cap = stop.clone();
         let latest_c = latest.clone();
@@ -791,11 +782,7 @@ async fn process_loop(
         frames += 1;
         if fps_t0.elapsed() >= Duration::from_secs(2) {
             let fps = frames as f64 / fps_t0.elapsed().as_secs_f64();
-            metrics
-                .write()
-                .unwrap()
-                .fps
-                .insert(camera_id.clone(), fps);
+            metrics.write().unwrap().fps.insert(camera_id.clone(), fps);
             frames = 0;
             fps_t0 = Instant::now();
             let m = metrics.read().unwrap();
@@ -817,7 +804,7 @@ fn capture_ffmpeg_loop(
     rtsp_url: &str,
     ffmpeg_bin: &str,
     stop: Arc<AtomicBool>,
-    latest: Arc<RwLock<Option<(u32, u32, Vec<u8>, Instant)>>>,
+    latest: LatestFrame,
 ) {
     use std::io::Read;
     use std::process::{Command, Stdio};
@@ -907,6 +894,7 @@ fn bundled_bin_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+#[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 async fn infer_frame(
     camera_id: &str,
     w: u32,

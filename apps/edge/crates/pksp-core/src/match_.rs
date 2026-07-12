@@ -44,7 +44,11 @@ pub fn match_top1(
 
     let scores = cosine_scores(query, gallery);
     let mut order: Vec<usize> = (0..scores.len()).collect();
-    order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let top1 = order[0];
     let top1_score = scores[top1];
@@ -99,7 +103,7 @@ mod tests {
     #[test]
     fn cosine_identical_is_one() {
         let (a, _) = ortho_pair();
-        let scores = cosine_scores(&a, &[a.clone()]);
+        let scores = cosine_scores(&a, std::slice::from_ref(&a));
         assert!((scores[0] - 1.0).abs() < 1e-5);
     }
 
@@ -150,14 +154,7 @@ mod tests {
         }
         let g2 = l2_normalize(&g2);
         let gallery = vec![g1, g2];
-        let r = match_top1(
-            &a,
-            &gallery,
-            &[1, 2],
-            &["A".into(), "B".into()],
-            0.3,
-            0.5,
-        );
+        let r = match_top1(&a, &gallery, &[1, 2], &["A".into(), "B".into()], 0.3, 0.5);
         assert_eq!(r.label, "AMBIGUOUS");
         assert!(r.employee_id.is_none());
     }

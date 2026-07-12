@@ -1,9 +1,9 @@
 use crate::auth::{create_token, password_ok, verify_token, AuthUser};
 use crate::error::AppError;
 use crate::state::AppState;
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -82,10 +82,7 @@ pub async fn login(
     if !password_ok(&state.settings.admin_password, &body.password) {
         return Err(AppError::Unauthorized("Invalid password".into()));
     }
-    let token = create_token(
-        &state.settings.jwt_secret,
-        state.settings.jwt_ttl_hours,
-    )?;
+    let token = create_token(&state.settings.jwt_secret, state.settings.jwt_ttl_hours)?;
     Ok(Json(json!({
         "access_token": token,
         "token_type": "bearer",
@@ -118,11 +115,10 @@ pub async fn create_employee(
     _auth: AuthUser,
     Json(body): Json<EmployeeCreate>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let exists: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM employees WHERE employee_code = ?")
-            .bind(&body.employee_code)
-            .fetch_optional(&state.pool)
-            .await?;
+    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM employees WHERE employee_code = ?")
+        .bind(&body.employee_code)
+        .fetch_optional(&state.pool)
+        .await?;
     if exists.is_some() {
         return Err(AppError::Conflict("Employee code already exists".into()));
     }
@@ -430,9 +426,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         "server_ts": ts,
         "gallery_version": version,
     });
-    let _ = sender
-        .send(Message::Text(hello.to_string().into()))
-        .await;
+    let _ = sender.send(Message::Text(hello.to_string().into())).await;
 
     let send_task = tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {

@@ -36,8 +36,8 @@ pub fn point_in_polygon(x: f32, y: f32, polygon: &[(f32, f32)]) -> bool {
     for i in 0..n {
         let (xi, yi) = polygon[i];
         let (xj, yj) = polygon[j];
-        let intersect = ((yi > y) != (yj > y))
-            && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi);
+        let intersect =
+            ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi);
         if intersect {
             inside = !inside;
         }
@@ -96,9 +96,9 @@ pub fn trajectory_is_walkby(track: &Track, zones: &[Zone], min_dwell_frames: usi
         .centroids
         .iter()
         .filter(|&&(x, y)| {
-            zones.iter().any(|z| {
-                z.kind == ZoneKind::Active && point_in_polygon(x, y, &z.polygon)
-            })
+            zones
+                .iter()
+                .any(|z| z.kind == ZoneKind::Active && point_in_polygon(x, y, &z.polygon))
         })
         .count();
 
@@ -161,14 +161,15 @@ pub fn prefer_commit_track<'a>(
         if !tr.quality_ok || tr.employee_id.is_none() {
             continue;
         }
-        if smart_scene_enabled && !zones.is_empty() {
-            if track_zone(tr.bbox, zones) != Some(ZoneKind::Active) {
-                continue;
-            }
+        if smart_scene_enabled
+            && !zones.is_empty()
+            && track_zone(tr.bbox, zones) != Some(ZoneKind::Active)
+        {
+            continue;
         }
         let area = (tr.bbox.2 - tr.bbox.0).max(0.0) * (tr.bbox.3 - tr.bbox.1).max(0.0);
-        let better = area > best_area + 1e-6
-            || ((area - best_area).abs() <= 1e-6 && tr.score > best_score);
+        let better =
+            area > best_area + 1e-6 || ((area - best_area).abs() <= 1e-6 && tr.score > best_score);
         if better {
             best = Some(tr);
             best_area = area;
@@ -242,33 +243,18 @@ pub fn default_door_zones() -> ZoneMap {
             Zone {
                 id: "active".into(),
                 kind: ZoneKind::Active,
-                polygon: vec![
-                    (0.30, 0.25),
-                    (0.70, 0.25),
-                    (0.70, 0.85),
-                    (0.30, 0.85),
-                ],
+                polygon: vec![(0.30, 0.25), (0.70, 0.25), (0.70, 0.85), (0.30, 0.85)],
             },
             Zone {
                 id: "approach".into(),
                 kind: ZoneKind::Approach,
-                polygon: vec![
-                    (0.15, 0.10),
-                    (0.85, 0.10),
-                    (0.85, 0.90),
-                    (0.15, 0.90),
-                ],
+                polygon: vec![(0.15, 0.10), (0.85, 0.10), (0.85, 0.90), (0.15, 0.90)],
             },
             Zone {
                 id: "ignore_left".into(),
                 kind: ZoneKind::Ignore,
                 // left strip — posters / frame edge
-                polygon: vec![
-                    (0.0, 0.0),
-                    (0.12, 0.0),
-                    (0.12, 1.0),
-                    (0.0, 1.0),
-                ],
+                polygon: vec![(0.0, 0.0), (0.12, 0.0), (0.12, 1.0), (0.0, 1.0)],
             },
         ],
     }
@@ -310,11 +296,7 @@ mod tests {
 
     #[test]
     fn ignore_zone_no_vote() {
-        assert!(!should_vote(
-            Some(ZoneKind::Ignore),
-            true,
-            false
-        ));
+        assert!(!should_vote(Some(ZoneKind::Ignore), true, false));
         assert!(should_vote(Some(ZoneKind::Approach), true, false));
         assert!(should_vote(Some(ZoneKind::Active), true, false));
         assert!(should_vote(Some(ZoneKind::Ignore), false, false));
@@ -326,13 +308,7 @@ mod tests {
         let zones = active_map().zones;
         let mut track = base_track(
             (0.05, 0.4, 0.15, 0.6),
-            vec![
-                (0.05, 0.5),
-                (0.2, 0.5),
-                (0.4, 0.5),
-                (0.6, 0.5),
-                (0.85, 0.5),
-            ],
+            vec![(0.05, 0.5), (0.2, 0.5), (0.4, 0.5), (0.6, 0.5), (0.85, 0.5)],
         );
         track.bbox = (0.80, 0.4, 0.90, 0.6);
         assert!(trajectory_is_walkby(&track, &zones, 3));
@@ -344,12 +320,7 @@ mod tests {
         let zones = active_map().zones;
         let track = base_track(
             (0.4, 0.4, 0.55, 0.7),
-            vec![
-                (0.45, 0.5),
-                (0.46, 0.51),
-                (0.47, 0.52),
-                (0.48, 0.53),
-            ],
+            vec![(0.45, 0.5), (0.46, 0.51), (0.47, 0.52), (0.48, 0.53)],
         );
         assert!(!trajectory_is_walkby(&track, &zones, 3));
         assert!(commit_eligible(&track, &zones, true, 3));

@@ -2,11 +2,11 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use pksp_core::{
-    aggregate_daily, daily_csv_headers, Direction, EventKind, FsmDecision, PriorEvent, RawEvent,
-    EmployeeRef,
-};
 use pksp_core::on_identity_commit;
+use pksp_core::{
+    aggregate_daily, daily_csv_headers, Direction, EmployeeRef, EventKind, FsmDecision, PriorEvent,
+    RawEvent,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
@@ -111,9 +111,7 @@ impl Settings {
             embedding_dim: env_or("EMBEDDING_DIM", "512").parse().unwrap_or(512),
             model_name: env_or("MODEL_NAME", "buffalo_l"),
             enable_smart_scene: env_or("ENABLE_SMART_SCENE", "true") != "false",
-            walkby_min_dwell_frames: env_or("WALKBY_MIN_DWELL_FRAMES", "3")
-                .parse()
-                .unwrap_or(3),
+            walkby_min_dwell_frames: env_or("WALKBY_MIN_DWELL_FRAMES", "3").parse().unwrap_or(3),
             zone_config_dir: {
                 if let Ok(v) = std::env::var("ZONE_CONFIG_DIR") {
                     PathBuf::from(v)
@@ -196,9 +194,9 @@ pub fn resolve_sqlite_path(url: &str) -> PathBuf {
                 // sqlite:////tmp/x → after_scheme = ////tmp/x → strip // → //tmp/x
                 return PathBuf::from(format!("/{abs}"));
             }
-            if rest.starts_with('/') {
+            if let Some(rel) = rest.strip_prefix('/') {
                 // three-slash: /./data/pksp.db or /data/pksp.db → drop one leading /
-                return PathBuf::from(&rest[1..]);
+                return PathBuf::from(rel);
             }
             // sqlite://host/path — treat rest as path
             return PathBuf::from(rest);
@@ -210,12 +208,10 @@ pub fn resolve_sqlite_path(url: &str) -> PathBuf {
 }
 
 pub async fn connect_pool(settings: &Settings) -> Result<SqlitePool> {
-    std::fs::create_dir_all(&settings.data_dir).with_context(|| {
-        format!("create data_dir {}", settings.data_dir.display())
-    })?;
-    std::fs::create_dir_all(settings.enroll_dir()).with_context(|| {
-        format!("create enroll_dir {}", settings.enroll_dir().display())
-    })?;
+    std::fs::create_dir_all(&settings.data_dir)
+        .with_context(|| format!("create data_dir {}", settings.data_dir.display()))?;
+    std::fs::create_dir_all(settings.enroll_dir())
+        .with_context(|| format!("create enroll_dir {}", settings.enroll_dir().display()))?;
 
     let db_path = resolve_sqlite_path(&settings.database_url);
     if db_path != Path::new(":memory:") {
@@ -265,11 +261,9 @@ pub async fn connect_pool(settings: &Settings) -> Result<SqlitePool> {
 }
 
 async fn ensure_gallery_version(pool: &SqlitePool) -> Result<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO app_meta(key, value) VALUES('gallery_version', '0')",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT OR IGNORE INTO app_meta(key, value) VALUES('gallery_version', '0')")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -304,6 +298,7 @@ pub async fn seed_or_upsert_cameras(pool: &SqlitePool, settings: &Settings) -> R
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 async fn upsert_camera(
     pool: &SqlitePool,
     id: &str,
@@ -352,9 +347,7 @@ pub async fn gallery_version(pool: &SqlitePool) -> Result<u64> {
         sqlx::query_as("SELECT value FROM app_meta WHERE key = 'gallery_version'")
             .fetch_optional(pool)
             .await?;
-    Ok(row
-        .and_then(|(v,)| v.parse().ok())
-        .unwrap_or(0))
+    Ok(row.and_then(|(v,)| v.parse().ok()).unwrap_or(0))
 }
 
 pub async fn bump_gallery_version(pool: &SqlitePool) -> Result<u64> {
@@ -471,12 +464,10 @@ pub async fn employee_dict(pool: &SqlitePool, id: i64) -> Result<serde_json::Val
     .bind(id)
     .fetch_all(pool)
     .await?;
-    let emb = sqlx::query(
-        "SELECT num_images_used FROM employee_embeddings WHERE employee_id=?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let emb = sqlx::query("SELECT num_images_used FROM employee_embeddings WHERE employee_id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     let usable = images
         .iter()
         .filter(|i| i.get::<i64, _>("usable") != 0)
@@ -556,6 +547,7 @@ pub async fn load_gallery_matrix(
     Ok((ids, names, vecs))
 }
 
+#[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 pub async fn commit_identity(
     pool: &SqlitePool,
     employee_id: i64,
@@ -689,12 +681,10 @@ pub async fn build_daily(pool: &SqlitePool, day: &str) -> Result<Vec<serde_json:
             department: r.get("department"),
         })
         .collect();
-    let evs = sqlx::query(
-        "SELECT employee_id, kind, ts FROM attendance_events WHERE local_date=?",
-    )
-    .bind(day)
-    .fetch_all(pool)
-    .await?;
+    let evs = sqlx::query("SELECT employee_id, kind, ts FROM attendance_events WHERE local_date=?")
+        .bind(day)
+        .fetch_all(pool)
+        .await?;
     let raw: Vec<RawEvent> = evs
         .iter()
         .filter_map(|r| {

@@ -13,7 +13,10 @@ pub use daily::{
     aggregate_daily, daily_csv_headers, derive_status, DailyRow, EmployeeRef, RawEvent, Status,
 };
 pub use embed::{l2_normalize, mean_l2_embedding, pack_embedding, unpack_embedding, EmbedError};
-pub use fsm::{in_cooldown, on_identity_commit, resolve_kind, Direction, EventKind, FsmDecision, PriorEvent, SkipReason};
+pub use fsm::{
+    in_cooldown, on_identity_commit, resolve_kind, Direction, EventKind, FsmDecision, PriorEvent,
+    SkipReason,
+};
 pub use match_::{cosine_scores, match_top1, MatchResult};
 pub use quality::{
     blur_ok, blur_variance, exposure_ok, mean_luma, pose_ok, pose_yaw_approx, quality_gate,

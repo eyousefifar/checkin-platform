@@ -153,7 +153,12 @@ mod tests {
     #[test]
     fn in_camera_always_check_in() {
         let d = on_identity_commit(Direction::In, ts(8, 0), None, None, 90.0, 30.0);
-        assert_eq!(d, FsmDecision::Commit { kind: EventKind::CheckIn });
+        assert_eq!(
+            d,
+            FsmDecision::Commit {
+                kind: EventKind::CheckIn
+            }
+        );
     }
 
     #[test]
@@ -163,28 +168,24 @@ mod tests {
             ts: ts(8, 0),
             camera_id: "cam_in".into(),
         };
-        let d = on_identity_commit(
-            Direction::Out,
-            ts(17, 0),
-            Some(&prior),
-            None,
-            90.0,
-            30.0,
+        let d = on_identity_commit(Direction::Out, ts(17, 0), Some(&prior), None, 90.0, 30.0);
+        assert_eq!(
+            d,
+            FsmDecision::Commit {
+                kind: EventKind::CheckOut
+            }
         );
-        assert_eq!(d, FsmDecision::Commit { kind: EventKind::CheckOut });
     }
 
     #[test]
     fn bidirectional_walk_in_then_out_after_dwell() {
-        let d1 = on_identity_commit(
-            Direction::Bidirectional,
-            ts(8, 0),
-            None,
-            None,
-            90.0,
-            30.0,
+        let d1 = on_identity_commit(Direction::Bidirectional, ts(8, 0), None, None, 90.0, 30.0);
+        assert_eq!(
+            d1,
+            FsmDecision::Commit {
+                kind: EventKind::CheckIn
+            }
         );
-        assert_eq!(d1, FsmDecision::Commit { kind: EventKind::CheckIn });
 
         let prior = PriorEvent {
             kind: EventKind::CheckIn,
@@ -199,7 +200,12 @@ mod tests {
             30.0,
             30.0,
         );
-        assert_eq!(d2, FsmDecision::Commit { kind: EventKind::CheckOut });
+        assert_eq!(
+            d2,
+            FsmDecision::Commit {
+                kind: EventKind::CheckOut
+            }
+        );
     }
 
     #[test]
@@ -211,14 +217,7 @@ mod tests {
             ts: last,
             camera_id: "cam_in".into(),
         };
-        let d = on_identity_commit(
-            Direction::In,
-            now,
-            Some(&prior),
-            Some(last),
-            90.0,
-            30.0,
-        );
+        let d = on_identity_commit(Direction::In, now, Some(&prior), Some(last), 90.0, 30.0);
         assert_eq!(
             d,
             FsmDecision::Skip {

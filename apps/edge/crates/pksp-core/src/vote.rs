@@ -80,12 +80,7 @@ mod tests {
             tracks = assign_tracks(
                 &mut state,
                 &[Detection {
-                    bbox: (
-                        0.1 + i as f32 * 0.01,
-                        0.1,
-                        0.3 + i as f32 * 0.01,
-                        0.4,
-                    ),
+                    bbox: (0.1 + i as f32 * 0.01, 0.1, 0.3 + i as f32 * 0.01, 0.4),
                     employee_id: Some(7),
                     score: 0.6,
                     label: "X".into(),

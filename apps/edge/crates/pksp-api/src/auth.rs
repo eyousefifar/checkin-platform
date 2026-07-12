@@ -37,6 +37,7 @@ pub fn verify_token(secret: &str, token: &str) -> Result<Claims, AppError> {
 }
 
 pub struct AuthUser {
+    #[allow(dead_code)] // reserved for future audit/RBAC; claims.sub is validated
     pub sub: String,
 }
 

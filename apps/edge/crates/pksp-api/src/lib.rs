@@ -30,11 +30,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         Arc::new(MockFaceEngine::new(settings.embedding_dim))
     } else {
         let model_dir = settings.model_dir();
-        let ort = OrtFaceEngine::try_load_with(
-            &model_dir,
-            settings.det_size,
-            &settings.onnx_providers,
-        );
+        let ort =
+            OrtFaceEngine::try_load_with(&model_dir, settings.det_size, &settings.onnx_providers);
         if ort.ready() {
             info!(
                 provider = ort.execution_provider(),
@@ -64,11 +61,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     // Prefer explicit H.264 RTSP; else transcoder for H.265 / stream1 / FORCE_TRANSCODE.
     let work_dir = settings.data_dir.clone();
     let force_tc = std::env::var("FORCE_TRANSCODE").as_deref() == Ok("true");
-    let need_transcode = pksp_media::should_transcode(
-        &settings.cam_in_rtsp,
-        &settings.cam_in_h264_rtsp,
-        force_tc,
-    );
+    let need_transcode =
+        pksp_media::should_transcode(&settings.cam_in_rtsp, &settings.cam_in_h264_rtsp, force_tc);
     let media_cfg = MediaConfig {
         mediamtx_bin: settings.mediamtx_bin.clone(),
         config_path: settings.mediamtx_config.clone(),
@@ -201,10 +195,7 @@ pub fn app(state: AppState) -> Router {
             "/api/employees/{id}",
             get(routes::get_employee).patch(routes::update_employee),
         )
-        .route(
-            "/api/employees/{id}/images",
-            post(routes::upload_images),
-        )
+        .route("/api/employees/{id}/images", post(routes::upload_images))
         .route(
             "/api/employees/{id}/recompute-embedding",
             post(routes::recompute_embedding),

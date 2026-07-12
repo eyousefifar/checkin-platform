@@ -42,7 +42,7 @@ pub fn pack_embedding(v: &[f32], dim: usize) -> Result<Vec<u8>, EmbedError> {
 
 /// Unpack LE float32 blob and L2-normalize (defensive).
 pub fn unpack_embedding(blob: &[u8], dim: usize) -> Result<Vec<f32>, EmbedError> {
-    if blob.len() % 4 != 0 {
+    if !blob.len().is_multiple_of(4) {
         return Err(EmbedError::BadBlob { got: blob.len() });
     }
     let n = blob.len() / 4;

@@ -96,12 +96,7 @@ pub fn aggregate_daily(employees: &[EmployeeRef], events: &[RawEvent]) -> Vec<Da
             (Some(fi), Some(lo)) if lo >= fi => Some((lo - fi).num_minutes()),
             _ => None,
         };
-        let status = derive_status(
-            first_in,
-            last_out,
-            ins.len() as i32,
-            outs.len() as i32,
-        );
+        let status = derive_status(first_in, last_out, ins.len() as i32, outs.len() as i32);
         rows.push(DailyRow {
             employee_id: emp.id,
             employee_code: emp.employee_code.clone(),
@@ -115,7 +110,7 @@ pub fn aggregate_daily(employees: &[EmployeeRef], events: &[RawEvent]) -> Vec<Da
             check_out_count: outs.len() as i32,
         });
     }
-    rows.sort_by(|a, b| a.full_name.to_lowercase().cmp(&b.full_name.to_lowercase()));
+    rows.sort_by_key(|a| a.full_name.to_lowercase());
     rows
 }
 
@@ -190,8 +185,10 @@ mod tests {
             },
         ];
         let rows = aggregate_daily(&emps, &events);
-        let by_code: std::collections::HashMap<_, _> =
-            rows.into_iter().map(|r| (r.employee_code.clone(), r)).collect();
+        let by_code: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|r| (r.employee_code.clone(), r))
+            .collect();
         assert_eq!(by_code["E1"].status, "present");
         assert_eq!(by_code["E1"].duration_minutes, Some(540));
         assert_eq!(by_code["E1"].check_in_count, 1);

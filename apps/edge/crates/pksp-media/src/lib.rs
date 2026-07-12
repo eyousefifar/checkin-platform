@@ -106,7 +106,9 @@ impl MediaSupervisor {
             let mut cmd = Command::new(&bin);
             cmd.arg(cfg_path.as_os_str());
             cmd.current_dir(&self.cfg.work_dir);
-            cmd.stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+            cmd.stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
 
             match cmd.spawn() {
                 Ok(child) => {
@@ -186,7 +188,9 @@ impl MediaSupervisor {
                 "flv",
                 &rtmp,
             ]);
-            cmd.stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+            cmd.stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
 
             match cmd.spawn() {
                 Ok(child) => {
@@ -231,7 +235,9 @@ pub fn resolve_bin(configured: &str, default_name: &str) -> Option<PathBuf> {
         }
 
         // Bundled under apps/edge/bin (from this crate: crates/pksp-media → ../../bin)
-        let edge_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bin").join(&name);
+        let edge_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bin")
+            .join(&name);
         if let Ok(canon) = edge_bin.canonicalize() {
             if canon.is_file() {
                 return Some(canon);
@@ -380,9 +386,11 @@ mod tests {
         let p = resolve_bin("", "mediamtx");
         if let Some(path) = p {
             assert!(path.is_file(), "{path:?}");
-            assert!(
-                path.file_name().unwrap().to_string_lossy().contains("mediamtx")
-            );
+            assert!(path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("mediamtx"));
         }
     }
 }

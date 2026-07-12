@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pksp_api;
 use pksp_db::{connect_pool, Settings};
 use tracing_subscriber::EnvFilter;
 

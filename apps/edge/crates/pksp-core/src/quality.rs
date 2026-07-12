@@ -43,7 +43,7 @@ pub fn quality_gate(
         };
     }
     let aspect = if h != 0.0 { w / h } else { 0.0 };
-    if aspect < 0.4 || aspect > 2.5 {
+    if !(0.4..=2.5).contains(&aspect) {
         return QualityResult {
             ok: false,
             reason: Some("bad_aspect".into()),
@@ -145,6 +145,7 @@ pub fn exposure_ok(mean: f32, lo: f32, hi: f32) -> QualityResult {
 }
 
 /// Base gate AND optional extensions. Pass `None` / disabled thresholds to skip.
+#[allow(clippy::too_many_arguments)] // ponytail: orchestration boundary; group only when another caller exists
 pub fn quality_gate_extended(
     det_score: f32,
     bbox_xyxy: (f32, f32, f32, f32),
@@ -205,7 +206,15 @@ mod tests {
 
     #[test]
     fn rejects_low_score() {
-        let r = quality_gate(0.2, (100.0, 100.0, 200.0, 200.0), 0.5, 60, 1920, 1080, false);
+        let r = quality_gate(
+            0.2,
+            (100.0, 100.0, 200.0, 200.0),
+            0.5,
+            60,
+            1920,
+            1080,
+            false,
+        );
         assert!(!r.ok);
         assert_eq!(r.reason.as_deref(), Some("low_det_score"));
     }
@@ -219,21 +228,21 @@ mod tests {
 
     #[test]
     fn accepts_good_face() {
-        let r = quality_gate(0.9, (100.0, 100.0, 220.0, 240.0), 0.5, 60, 1920, 1080, false);
+        let r = quality_gate(
+            0.9,
+            (100.0, 100.0, 220.0, 240.0),
+            0.5,
+            60,
+            1920,
+            1080,
+            false,
+        );
         assert!(r.ok);
     }
 
     #[test]
     fn normalized_bbox() {
-        let r = quality_gate(
-            0.9,
-            (0.4, 0.3, 0.55, 0.55),
-            0.5,
-            60,
-            1920,
-            1080,
-            true,
-        );
+        let r = quality_gate(0.9, (0.4, 0.3, 0.55, 0.55), 0.5, 60, 1920, 1080, true);
         assert!(r.ok);
     }
 
