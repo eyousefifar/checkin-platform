@@ -1,25 +1,57 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
+import type { EnrollmentResult } from "@/lib/types";
+
+type SelectedPreview = {
+  file: File;
+  url: string;
+};
 
 export default function NewEmployeePage() {
-  const router = useRouter();
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [dept, setDept] = useState("");
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [msg, setMsg] = useState("");
-  const [error, setError] = useState("");
+  const [selected, setSelected] = useState<SelectedPreview[]>([]);
+  const [createError, setCreateError] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [uploadResult, setUploadResult] = useState<EnrollmentResult | null>(null);
+  const [createdId, setCreatedId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Revoke every object URL on selection change and unmount.
+  useEffect(() => {
+    return () => {
+      selected.forEach((s) => URL.revokeObjectURL(s.url));
+    };
+  }, [selected]);
+
+  const created = createdId != null;
+
+  function onFilesChange(list: FileList | null) {
+    setSelected((prev) => {
+      prev.forEach((s) => URL.revokeObjectURL(s.url));
+      if (!list) return [];
+      return Array.from(list).map((file) => ({
+        file,
+        url: URL.createObjectURL(file),
+      }));
+    });
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    // Metadata create is the commit point — never repeat after success.
+    if (createdId != null) return;
+
     setBusy(true);
-    setError("");
-    setMsg("");
+    setCreateError("");
+    setUploadError("");
+    setUploadResult(null);
+
+    let empId: number;
     try {
       const emp = await api<{ id: number }>("/api/employees", {
         method: "POST",
@@ -29,27 +61,52 @@ export default function NewEmployeePage() {
           department: dept || null,
         }),
       });
-      if (files && files.length > 0) {
-        const fd = new FormData();
-        Array.from(files).forEach((f) => fd.append("files", f));
-        const up = await api<{
-          usable: number;
-          rejected: { filename: string; reason: string }[];
-          embedding_ready: boolean;
-        }>(`/api/employees/${emp.id}/images`, { method: "POST", body: fd });
-        setMsg(
-          `Created. Usable ${up.usable}, embedding ${up.embedding_ready ? "ready" : "not ready"}. Rejected: ${up.rejected.map((r) => r.reason).join(", ") || "none"}`,
-        );
-      } else {
-        setMsg("Created without images — upload faces on detail page.");
-      }
-      router.push(`/employees/${emp.id}`);
+      empId = emp.id;
+      setCreatedId(empId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed");
+      setCreateError(err instanceof Error ? err.message : "Failed to create employee");
+      setBusy(false);
+      return;
+    }
+
+    if (selected.length === 0) {
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const fd = new FormData();
+      selected.forEach((s) => fd.append("files", s.file));
+      const up = await api<EnrollmentResult>(`/api/employees/${empId}/images`, {
+        method: "POST",
+        body: fd,
+      });
+      setUploadResult(up);
+    } catch (err) {
+      setUploadError(
+        err instanceof Error
+          ? err.message
+          : "Image upload failed",
+      );
     } finally {
       setBusy(false);
     }
   }
+
+  const detailHref = createdId != null ? `/employees/${createdId}` : null;
+
+  const resultRows = useMemo(() => {
+    if (!uploadResult) return [];
+    if (uploadResult.results && uploadResult.results.length > 0) {
+      return uploadResult.results;
+    }
+    // Fall back to rejected list when per-file results are absent.
+    return uploadResult.rejected.map((r) => ({
+      filename: r.filename,
+      usable: false,
+      reason: r.reason,
+    }));
+  }, [uploadResult]);
 
   return (
     <div className="mx-auto max-w-xl p-6">
@@ -70,28 +127,137 @@ export default function NewEmployeePage() {
         </ul>
       </div>
 
+      {created && detailHref && (
+        <div className="mt-6 space-y-3 border border-hairline bg-card p-4" role="status">
+          <p className="text-sm text-success">
+            Employee created (id {createdId}). Metadata will not be submitted again.
+          </p>
+          <p className="text-sm text-body">
+            Open the detail page to review or retry photos:{" "}
+            <Link href={detailHref} className="text-m-blue-light underline" data-testid="detail-link">
+              Employee #{createdId}
+            </Link>
+          </p>
+
+          {selected.length === 0 && !uploadResult && !uploadError && (
+            <p className="text-sm text-body">
+              Created without images — upload faces on the detail page.
+            </p>
+          )}
+
+          {uploadError && (
+            <div role="alert" className="text-sm text-m-red">
+              Employee exists, but photo upload failed: {uploadError}. Retry images
+              from the detail page — do not create the employee again.
+            </div>
+          )}
+
+          {uploadResult && (
+            <div className="space-y-2 text-sm text-body">
+              <p>
+                Upload: usable {uploadResult.usable}/{uploadResult.received}, embedding{" "}
+                {uploadResult.embedding_ready ? "ready" : "not ready"}
+                {uploadResult.gallery_reload_pending
+                  ? " · recognition is catching up (gallery reload pending)"
+                  : ""}
+              </p>
+              {uploadResult.gallery_reload_pending && (
+                <p className="text-xs text-warning" data-testid="gallery-pending">
+                  Images committed; recognition will use them after the gallery reloads.
+                  Do not resubmit these files.
+                </p>
+              )}
+              {resultRows.length > 0 && (
+                <ul className="space-y-1 font-mono text-xs" data-testid="upload-results">
+                  {resultRows.map((r) => (
+                    <li key={r.filename}>
+                      <span className="text-ink">{r.filename}</span>
+                      {": "}
+                      {r.usable ? (
+                        <span className="text-success">usable</span>
+                      ) : (
+                        <span className="text-m-red">
+                          rejected{r.reason ? ` — ${r.reason}` : ""}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
-        <Field label="Employee code" value={code} onChange={setCode} required />
-        <Field label="Full name" value={name} onChange={setName} required />
-        <Field label="Department" value={dept} onChange={setDept} />
+        <Field
+          label="Employee code"
+          value={code}
+          onChange={setCode}
+          required
+          disabled={created || busy}
+        />
+        <Field
+          label="Full name"
+          value={name}
+          onChange={setName}
+          required
+          disabled={created || busy}
+        />
+        <Field
+          label="Department"
+          value={dept}
+          onChange={setDept}
+          disabled={created || busy}
+        />
         <label className="block text-[11px] font-bold uppercase tracking-label text-muted">
           Face images
           <input
             type="file"
             accept="image/*"
             multiple
-            onChange={(e) => setFiles(e.target.files)}
-            className="mt-2 block w-full text-sm text-body"
+            disabled={created || busy}
+            onChange={(e) => onFilesChange(e.target.files)}
+            className="mt-2 block w-full text-sm text-body disabled:opacity-50"
+            data-testid="face-files"
           />
         </label>
-        {error && <p className="text-sm text-m-red">{error}</p>}
-        {msg && <p className="text-sm text-success">{msg}</p>}
+
+        {selected.length > 0 && (
+          <ul
+            className="flex flex-wrap gap-3"
+            data-testid="file-previews"
+            aria-label="Selected face image previews"
+          >
+            {selected.map((s) => (
+              <li key={s.url} className="w-20 space-y-1">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={s.url}
+                  alt=""
+                  className="h-16 w-16 border border-hairline object-cover"
+                />
+                <p className="truncate font-mono text-[10px] text-body" title={s.file.name}>
+                  {s.file.name}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {createError && (
+          <p className="text-sm text-m-red" role="alert">
+            {createError}
+          </p>
+        )}
+
         <button
           type="submit"
-          disabled={busy}
+          disabled={busy || created}
           className="border border-ink px-6 py-3 text-xs font-bold uppercase tracking-label text-ink hover:bg-elevated disabled:opacity-50"
+          data-testid="save-employee"
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? "Saving…" : created ? "Created" : "Save"}
         </button>
       </form>
     </div>
@@ -103,11 +269,13 @@ function Field({
   value,
   onChange,
   required,
+  disabled,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   required?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label className="block text-[11px] font-bold uppercase tracking-label text-muted">
@@ -115,8 +283,9 @@ function Field({
       <input
         value={value}
         required={required}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-2 w-full border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-m-blue-dark"
+        className="mt-2 w-full border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-m-blue-dark disabled:opacity-50"
       />
     </label>
   );

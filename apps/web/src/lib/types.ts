@@ -60,8 +60,11 @@ export type Employee = {
   }[];
 };
 
-/** Additive enrollment upload / recompute result (frozen fields retained). */
-export type EnrollUploadResult = {
+/**
+ * Shared enrollment upload / recompute response.
+ * Frozen aggregate fields from plan 006 plus additive per-file results.
+ */
+export type EnrollmentResult = {
   received: number;
   usable: number;
   rejected: { filename: string; reason: string }[];
@@ -70,6 +73,9 @@ export type EnrollUploadResult = {
   results?: { filename: string; usable: boolean; reason: string | null }[];
   gallery_reload_pending?: boolean;
 };
+
+/** @deprecated Prefer EnrollmentResult — same shape. */
+export type EnrollUploadResult = EnrollmentResult;
 
 export type DailyRow = {
   employee_id: number;
