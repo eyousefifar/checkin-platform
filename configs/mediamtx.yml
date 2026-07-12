@@ -22,11 +22,11 @@ paths:
     source: publisher
 
   cam_in:
-    # Highest quality feed (2560x1440 H.265) when IP_CAMERA_* are set in .env.
-    # docker-compose loads .env so ${...} substitution works.
-    source: rtsp://${IP_CAMERA_USER}:${IP_CAMERA_PASS}@${CAM_IP:-10.39.45.167}:554/${CAM_HIGH_QUALITY_PATH:-stream1}
-    # Fallback comment for manual edit if substitution not desired:
-    # source: rtsp://admin:campkspQq123@10.39.45.167:554/stream1
+    # Pull path for the entrance camera. Prefer a credential-free local publisher
+    # or set CAM_IN_RTSP in a private (untracked) .env and point MediaMTX source
+    # at a path that does not embed user-info in tracked config.
+    # Never commit camera user:password URL user-info.
+    source: publisher
 
   cam_out:
     source: publisher

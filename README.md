@@ -73,7 +73,7 @@ export $(grep -v '^#' .env | xargs)
 
 In the dashboard you should now see the real high-res feed for "Entrance" and vision processing it (VAAPI decode is used automatically on this hardware when `CAPTURE_BACKEND=auto`).
 
-To force a specific URL, set `CAM_IN_RTSP=rtsp://admin:campkspQq123@10.39.45.167:554/stream1` (and `CAM_IN_WEBRTC_PATH=cam_in`).
+To force a specific camera path, set `CAM_IN_RTSP` in a private `.env` (never commit credentials in URL user-info) and `CAM_IN_WEBRTC_PATH=cam_in`.
 
 ### 3. API (Python 3.11 recommended)
 
@@ -84,8 +84,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 # optional real model: MOCK_VISION=false and ./scripts/download_models.sh
 export MOCK_VISION=true   # default theater + mock enroll embeddings
-export ADMIN_PASSWORD=change-me
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+export ADMIN_PASSWORD=<set-a-strong-password>
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Health: `curl http://localhost:8000/api/health`
@@ -103,7 +103,7 @@ Open **http://localhost:3000**
 
 ### 5. Admin
 
-1. Visit `/login` — password from `ADMIN_PASSWORD` (default `change-me`)
+1. Visit `/login` — password from `ADMIN_PASSWORD` (set in private `.env`)
 2. **Employees** → add person → upload face images → embedding ready
 3. **Dashboard** → live mock/real detections + event ticker
 4. **Attendance** → daily table → Export CSV

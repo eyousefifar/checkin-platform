@@ -15,7 +15,6 @@ use pksp_vision::{
     reload_gallery, start_vision_worker, FaceEngine, Gallery, MockFaceEngine, OrtFaceEngine,
 };
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -23,6 +22,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+    // Fail closed before DB, models, media children, or vision workers start.
+    let addr = settings
+        .validate_startup()
+        .map_err(|e| anyhow::anyhow!(e))?;
     let settings = Arc::new(settings);
     let pool = connect_pool(&settings).await?;
 
@@ -122,10 +125,6 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 
     let app = app(state.clone());
 
-    let addr: SocketAddr = settings
-        .bind_addr
-        .parse()
-        .unwrap_or_else(|_| "0.0.0.0:8000".parse().unwrap());
     info!("pksp listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -206,6 +205,19 @@ pub fn app(state: AppState) -> Router {
         .route("/api/cameras", get(routes::list_cameras_route))
         .route("/api/ws/live", get(routes::ws_live))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %req.method(),
+                    path = %http_request_path(req.uri()),
+                )
+            }),
+        )
         .with_state(state)
+}
+
+/// Span/path label from a request URI — path only, never query text.
+pub fn http_request_path(uri: &axum::http::Uri) -> &str {
+    uri.path()
 }

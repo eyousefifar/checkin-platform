@@ -13,15 +13,18 @@ export DATA_DIR=./data
 # Or: cd apps/edge && cargo build --release -p pksp-cli
 # Note: enable ort feature on pksp-vision via: cargo build -p pksp-cli --features pksp-vision/ort
 
-# 3. Env
+# 3. Env (owner-only secrets; never put camera passwords in RTSP user-info in git)
+umask 077
 export DATABASE_URL="sqlite:///./data/pksp-rust.db?mode=rwc"
 export DATA_DIR=./data
+chmod 700 "$DATA_DIR" 2>/dev/null || true
 export MOCK_VISION=true          # theater
 # export MOCK_VISION=false       # real faces when models + ort ready
 export ENABLE_SMART_SCENE=true
 export ZONE_CONFIG_DIR=./configs
-export BIND_ADDR=0.0.0.0:8000
+export BIND_ADDR=127.0.0.1:8000  # non-loopback requires explicit ADMIN_PASSWORD + JWT_SECRET (≥32)
 export CAM_IN_WEBRTC_PATH=demo   # or cam_in_h264 after transcoder
+# ADMIN_PASSWORD and JWT_SECRET must come from a private EnvironmentFile / .env (0600)
 
 # 4. Run
 ./apps/edge/target/release/pksp serve
@@ -40,7 +43,8 @@ export NEXT_PUBLIC_WEBRTC_BASE=http://<host>:8889
 Prefer **H.264** substream for browser WHEP. If only H.265 `stream1` is available, set `CAM_IN_RTSP` to that URL and let `pksp serve` run the supervised ffmpeg transcoder → `cam_in_h264`. Or set:
 
 ```bash
-export CAM_IN_H264_RTSP=rtsp://user:pass@cam/stream2   # skips transcoder
+# Prefer a credential-free H.264 path (set only in private .env):
+# export CAM_IN_H264_RTSP=   # no user-info in tracked docs
 export FORCE_TRANSCODE=true                            # force transcoder
 ```
 
@@ -69,6 +73,10 @@ tar xzf enroll-backup.tgz
 
 ## systemd sketch
 
+Use a dedicated service user/group. Keep the environment file outside the
+working tree and mode `0600`. `UMask=0077` ensures SQLite WAL/SHM and enrollment
+files stay owner-only (do not rely on ad-hoc chmod helpers for every file).
+
 ```ini
 [Unit]
 Description=PKSP Check-In Edge
@@ -76,8 +84,11 @@ After=network.target
 
 [Service]
 Type=simple
+User=pksp
+Group=pksp
 WorkingDirectory=/opt/pksp
-EnvironmentFile=/opt/pksp/.env
+EnvironmentFile=-/etc/pksp/pksp.env
+UMask=0077
 ExecStart=/opt/pksp/apps/edge/target/release/pksp serve
 Restart=on-failure
 RestartSec=3
@@ -85,6 +96,23 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
+
+### One-time permission repair (operator-run, service stopped)
+
+```bash
+# stop the service first
+sudo systemctl stop pksp
+sudo chown -R pksp:pksp /opt/pksp/data
+sudo chmod 700 /opt/pksp/data /opt/pksp/data/enroll
+sudo find /opt/pksp/data -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' -o -path '*/enroll/*' \) -exec chmod 600 {} \;
+sudo chmod 600 /etc/pksp/pksp.env
+sudo systemctl start pksp
+# verify process umask 0077 and no group/other bits under DATA_DIR
+```
+
+Direct-run (non-systemd) operators should begin the shell session with `umask 077`
+before creating `DATA_DIR` or the database. On non-Unix hosts, rely on OS ACLs /
+disk encryption instead of inventing a portability layer.
 
 ## Re-enroll (embedding space change)
 

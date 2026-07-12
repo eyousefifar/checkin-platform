@@ -118,7 +118,7 @@ Created/updated `/tmp/mediamtx-standalone/mediamtx.yml`:
 ```yaml
 paths:
   cam_in:
-    source: rtsp://admin:campkspQq123@10.39.45.167:554/stream1
+    source: publisher  # private RTSP URL lives only in untracked operator config
     rtspTransport: tcp
 
   cam_in_h264:
@@ -158,7 +158,7 @@ Launched in background; logs to `/tmp/gst-h264-transcode.log`.
 ```sql
 UPDATE cameras
 SET webrtc_path = 'cam_in_h264',
-    rtsp_url = 'rtsp://admin:campkspQq123@10.39.45.167:554/stream1'
+    rtsp_url = '<set-from-private-env-or-camera-admin>'
 WHERE id = 'cam_in';
 ```
 

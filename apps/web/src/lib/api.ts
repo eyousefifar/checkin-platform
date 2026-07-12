@@ -46,10 +46,7 @@ export async function api<T = unknown>(
 
 export { API_URL };
 
+/** Live WebSocket URL — never appends the browser JWT (Bearer remains for HTTP). */
 export function wsUrl(): string {
-  const base = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/ws/live";
-  const token = getToken();
-  if (!token) return base;
-  const sep = base.includes("?") ? "&" : "?";
-  return `${base}${sep}token=${encodeURIComponent(token)}`;
+  return process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/ws/live";
 }

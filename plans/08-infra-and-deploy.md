@@ -53,10 +53,11 @@ services:
 # configs/mediamtx.yml (illustrative — align with current MediaMTX schema)
 paths:
   cam_in:
-    source: rtsp://user:pass@192.168.1.10:554/stream1
+    # source: set via private env / operator-managed path (no user-info in git)
+    source: publisher
     sourceOnDemand: no
   cam_out:
-    source: rtsp://user:pass@192.168.1.11:554/stream1
+    source: publisher
     sourceOnDemand: no
   # Demo without cameras:
   demo:
@@ -87,15 +88,17 @@ Or MediaMTX + FFmpeg testsrc.
 ### `.env.example`
 
 ```bash
-# API
-ADMIN_PASSWORD=change-me
+# API — placeholders only; real values live in untracked .env (mode 0600)
+ADMIN_PASSWORD=<set-a-strong-password>
+JWT_SECRET=<generate-at-least-32-bytes>
 APP_TIMEZONE=UTC
 DATABASE_URL=sqlite:///./data/pksp.db
 CORS_ORIGINS=http://localhost:3000
+BIND_ADDR=127.0.0.1:8000
 
-# Cameras (also seed DB)
-CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
-CAM_OUT_RTSP=rtsp://127.0.0.1:8554/cam_out
+# Cameras (also seed DB) — set credential-free MediaMTX paths in private .env
+CAM_IN_RTSP=
+CAM_OUT_RTSP=
 CAM_IN_DIRECTION=in
 CAM_OUT_DIRECTION=out
 

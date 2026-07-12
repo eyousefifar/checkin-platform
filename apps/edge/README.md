@@ -31,9 +31,10 @@ export DATA_DIR=../../data/rust-edge          # from apps/edge; or ./data/rust-e
 export DATABASE_URL="sqlite:///${DATA_DIR}/pksp-rust.db?mode=rwc"
 # If DATA_DIR is relative, prefer the three-slash relative form:
 #   export DATABASE_URL="sqlite:///./data/rust-edge/pksp-rust.db"
-export ADMIN_PASSWORD=change-me
+export ADMIN_PASSWORD=<set-a-strong-password>
+export JWT_SECRET=<generate-at-least-32-bytes>
 export MOCK_VISION=true
-export BIND_ADDR=0.0.0.0:8000
+export BIND_ADDR=127.0.0.1:8000
 export CAM_IN_WEBRTC_PATH=demo
 # optional: MEDIAMTX_BIN=mediamtx MEDIAMTX_CONFIG=../../configs/mediamtx.yml
 

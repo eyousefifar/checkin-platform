@@ -18,7 +18,11 @@ pub struct Settings {
     pub database_url: String,
     pub data_dir: PathBuf,
     pub admin_password: String,
+    /// True when ADMIN_PASSWORD was set in the process environment (not a code default).
+    pub admin_password_from_env: bool,
     pub jwt_secret: String,
+    /// True when JWT_SECRET was set in the process environment (not a code default).
+    pub jwt_secret_from_env: bool,
     pub jwt_ttl_hours: i64,
     pub cors_origins: Vec<String>,
     pub app_timezone: String,
@@ -75,11 +79,17 @@ impl Settings {
         // Python monorepo .env uses `sqlite:///./data/pksp.db` (relative) — resolve later.
         let db_default = format!("sqlite://{}/pksp-rust.db?mode=rwc", data_dir.display());
         let database_url = env_or("DATABASE_URL", &db_default);
+        let (admin_password, admin_password_from_env) =
+            env_or_tracked("ADMIN_PASSWORD", "change-me");
+        let (jwt_secret, jwt_secret_from_env) =
+            env_or_tracked("JWT_SECRET", "dev-jwt-secret-change-me");
         Self {
             database_url,
             data_dir,
-            admin_password: env_or("ADMIN_PASSWORD", "change-me"),
-            jwt_secret: env_or("JWT_SECRET", "dev-jwt-secret-change-me"),
+            admin_password,
+            admin_password_from_env,
+            jwt_secret,
+            jwt_secret_from_env,
             jwt_ttl_hours: env_or("JWT_TTL_HOURS", "12").parse().unwrap_or(12),
             cors_origins: env_or("CORS_ORIGINS", "http://localhost:3000")
                 .split(',')
@@ -131,7 +141,7 @@ impl Settings {
             require_real_vision: env_or("REQUIRE_REAL_VISION", "false") == "true",
             vision_adaptive: env_or("VISION_ADAPTIVE", "false") == "true",
             cam_in_h264_rtsp: env_or("CAM_IN_H264_RTSP", ""),
-            bind_addr: env_or("BIND_ADDR", "0.0.0.0:8000"),
+            bind_addr: env_or("BIND_ADDR", "127.0.0.1:8000"),
             // Auto-resolve bundled apps/edge/bin/* unless overridden
             mediamtx_bin: env_or("MEDIAMTX_BIN", "mediamtx"),
             mediamtx_config: {
@@ -159,10 +169,69 @@ impl Settings {
     pub fn model_dir(&self) -> PathBuf {
         self.data_dir.join("models/buffalo_l")
     }
+
+    /// Fail closed before DB/media/worker startup when bind or secrets are unsafe.
+    pub fn validate_startup(&self) -> Result<std::net::SocketAddr, String> {
+        validate_bind_and_secrets(
+            &self.bind_addr,
+            &self.admin_password,
+            &self.jwt_secret,
+            self.admin_password_from_env,
+            self.jwt_secret_from_env,
+        )
+    }
+}
+
+/// Parse `BIND_ADDR` and enforce secret policy for non-loopback binds.
+///
+/// Loopback demo may keep built-in development fallbacks. Any non-loopback
+/// (including `0.0.0.0` / `::`) requires an explicit non-demo `ADMIN_PASSWORD`
+/// and an explicit `JWT_SECRET` of at least 32 bytes. Malformed bind text is
+/// rejected — never remapped to a wildcard.
+pub fn validate_bind_and_secrets(
+    bind_addr: &str,
+    admin_password: &str,
+    jwt_secret: &str,
+    admin_explicit: bool,
+    jwt_explicit: bool,
+) -> Result<std::net::SocketAddr, String> {
+    let addr: std::net::SocketAddr = bind_addr.parse().map_err(|_| {
+        format!("BIND_ADDR is malformed ({bind_addr:?}); expected host:port such as 127.0.0.1:8000")
+    })?;
+
+    let loopback = match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => ip.is_loopback(),
+    };
+    if loopback {
+        return Ok(addr);
+    }
+
+    const DEMO_ADMIN: &str = "change-me";
+    if !admin_explicit || admin_password.is_empty() || admin_password == DEMO_ADMIN {
+        return Err(
+            "ADMIN_PASSWORD must be explicitly set to a non-demo value when BIND_ADDR is not loopback"
+                .into(),
+        );
+    }
+    if !jwt_explicit || jwt_secret.len() < 32 {
+        return Err(
+            "JWT_SECRET must be explicitly set and at least 32 bytes when BIND_ADDR is not loopback"
+                .into(),
+        );
+    }
+    Ok(addr)
 }
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_or_tracked(key: &str, default: &str) -> (String, bool) {
+    match std::env::var(key) {
+        Ok(v) => (v, true),
+        Err(_) => (default.to_string(), false),
+    }
 }
 
 /// Resolve a SQLite file path from SQLAlchemy / sqlx-style URLs.
@@ -832,5 +901,65 @@ mod path_tests {
     fn bare_path() {
         let p = resolve_sqlite_path("data/rust-edge/pksp.db");
         assert_eq!(p, PathBuf::from("data/rust-edge/pksp.db"));
+    }
+}
+
+#[cfg(test)]
+mod security_settings_tests {
+    use super::validate_bind_and_secrets;
+
+    #[test]
+    fn loopback_accepts_demo_fallbacks() {
+        let addr = validate_bind_and_secrets(
+            "127.0.0.1:8000",
+            "change-me",
+            "dev-jwt-secret-change-me",
+            false,
+            false,
+        )
+        .expect("loopback demo ok");
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn ipv4_wildcard_rejects_missing_secrets() {
+        let err = validate_bind_and_secrets("0.0.0.0:8000", "change-me", "short", false, false)
+            .expect_err("wildcard needs secrets");
+        assert!(err.contains("ADMIN_PASSWORD"), "{err}");
+    }
+
+    #[test]
+    fn ipv6_wildcard_rejects_missing_jwt() {
+        let long_enough = "x".repeat(32);
+        let err = validate_bind_and_secrets(
+            "[::]:8000",
+            "not-the-demo-password",
+            &long_enough,
+            true,
+            false,
+        )
+        .expect_err("jwt must be explicit");
+        assert!(err.contains("JWT_SECRET"), "{err}");
+    }
+
+    #[test]
+    fn non_loopback_accepts_explicit_non_demo_secrets() {
+        let secret = "a".repeat(32);
+        let addr = validate_bind_and_secrets(
+            "10.0.0.5:8000",
+            "operator-chosen-password",
+            &secret,
+            true,
+            true,
+        )
+        .expect("lan bind with real secrets");
+        assert_eq!(addr.port(), 8000);
+    }
+
+    #[test]
+    fn malformed_bind_is_rejected() {
+        let err = validate_bind_and_secrets("not-an-addr", "x", &"y".repeat(32), true, true)
+            .expect_err("malformed");
+        assert!(err.contains("BIND_ADDR"), "{err}");
     }
 }

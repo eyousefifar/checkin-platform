@@ -15,7 +15,7 @@ open a pull request unless the operator explicitly asks.
 |---|---|---:|---:|---|---|
 | 001 | Establish the active-stack verification baseline | P1 | M | — | DONE |
 | 002 | Make Rust formatting and Clippy gates green | P2 | S | 001 | DONE |
-| 003 | Contain credentials, JWTs, and biometric files | P0 | M | 001 | IN PROGRESS |
+| 003 | Contain credentials, JWTs, and biometric files | P0 | M | 001 | DONE |
 | 004 | Replace heuristic face inference with SCRFD and ArcFace | P0 | L | 001, 002 | TODO |
 | 005 | Process each frame once and isolate blocking inference | P0 | M | 001, 004 | TODO |
 | 006 | Make enrollment cumulative, bounded, and recoverable | P0 | M | 001, 004, 005 | TODO |
