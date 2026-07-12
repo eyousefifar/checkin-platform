@@ -63,7 +63,13 @@ describe("AttendancePage timezone", () => {
     healthState.loading = true;
     healthState.error = null;
     apiMock.mockReset();
-    apiMock.mockResolvedValue([]);
+    // Daily + raw events load in parallel per selected date.
+    apiMock.mockImplementation(async (path: unknown) => {
+      if (typeof path === "string" && path.includes("/api/attendance/")) {
+        return [];
+      }
+      return [];
+    });
   });
 
   afterEach(() => {
@@ -86,10 +92,10 @@ describe("AttendancePage timezone", () => {
     await waitFor(() => {
       expect(apiMock).toHaveBeenCalled();
     });
-    // 22:30 UTC → 2026-07-13 in Asia/Tehran
-    expect(apiMock.mock.calls[0][0]).toBe(
-      "/api/attendance/daily?date=2026-07-13",
-    );
+    // 22:30 UTC → 2026-07-13 in Asia/Tehran — daily + events in parallel.
+    const initialPaths = apiMock.mock.calls.map((c) => c[0] as string);
+    expect(initialPaths).toContain("/api/attendance/daily?date=2026-07-13");
+    expect(initialPaths).toContain("/api/attendance/events?date=2026-07-13");
     expect(screen.getByTestId("attendance-timezone").textContent).toBe(
       "Asia/Tehran",
     );
@@ -103,8 +109,9 @@ describe("AttendancePage timezone", () => {
     });
 
     await waitFor(() => {
-      const last = apiMock.mock.calls[apiMock.mock.calls.length - 1][0];
-      expect(last).toBe("/api/attendance/daily?date=2026-07-10");
+      const paths = apiMock.mock.calls.map((c) => c[0] as string);
+      expect(paths).toContain("/api/attendance/daily?date=2026-07-10");
+      expect(paths).toContain("/api/attendance/events?date=2026-07-10");
     });
 
     const callsBeforeRefresh = apiMock.mock.calls.length;
@@ -131,20 +138,23 @@ describe("AttendancePage timezone", () => {
   it("renders known UTC instants as local times in the configured zone", async () => {
     healthState.loading = false;
     healthState.data = healthPayload("Asia/Tehran");
-    apiMock.mockResolvedValue([
-      {
-        employee_id: 1,
-        employee_code: "E1",
-        full_name: "Ada",
-        department: null,
-        first_in: "2026-07-12T20:00:00Z",
-        last_out: "2026-07-12T20:00:00Z",
-        duration_minutes: 0,
-        status: "present",
-        check_in_count: 1,
-        check_out_count: 1,
-      },
-    ]);
+    apiMock.mockImplementation(async (path: unknown) => {
+      if (typeof path === "string" && path.includes("/events")) return [];
+      return [
+        {
+          employee_id: 1,
+          employee_code: "E1",
+          full_name: "Ada",
+          department: null,
+          first_in: "2026-07-12T20:00:00Z",
+          last_out: "2026-07-12T20:00:00Z",
+          duration_minutes: 0,
+          status: "present",
+          check_in_count: 1,
+          check_out_count: 1,
+        },
+      ];
+    });
 
     render(<AttendancePage />);
 
@@ -157,20 +167,23 @@ describe("AttendancePage timezone", () => {
   it("formats the same UTC wire values for America/New_York", async () => {
     healthState.loading = false;
     healthState.data = healthPayload("America/New_York");
-    apiMock.mockResolvedValue([
-      {
-        employee_id: 2,
-        employee_code: "E2",
-        full_name: "Bob",
-        department: null,
-        first_in: "2026-07-12T20:00:00Z",
-        last_out: null,
-        duration_minutes: null,
-        status: "incomplete",
-        check_in_count: 1,
-        check_out_count: 0,
-      },
-    ]);
+    apiMock.mockImplementation(async (path: unknown) => {
+      if (typeof path === "string" && path.includes("/events")) return [];
+      return [
+        {
+          employee_id: 2,
+          employee_code: "E2",
+          full_name: "Bob",
+          department: null,
+          first_in: "2026-07-12T20:00:00Z",
+          last_out: null,
+          duration_minutes: null,
+          status: "incomplete",
+          check_in_count: 1,
+          check_out_count: 0,
+        },
+      ];
+    });
 
     render(<AttendancePage />);
 

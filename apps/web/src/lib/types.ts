@@ -90,6 +90,18 @@ export type DailyRow = {
   check_out_count: number;
 };
 
+/** Raw row from authenticated GET `/api/attendance/events` (no nested objects). */
+export type RawAttendanceEvent = {
+  id: number;
+  employee_id: number | null;
+  camera_id: string;
+  kind: string;
+  score: number | null;
+  /** UTC ISO timestamp (API appends Z). */
+  ts: string;
+  local_date: string;
+};
+
 /** Camera row from public `/api/health` (no source URLs). */
 export type HealthCamera = {
   id: string;

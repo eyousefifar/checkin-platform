@@ -152,7 +152,7 @@ export default function DashboardPage() {
           )}
         </div>
         <div className="min-h-[320px] min-w-0 lg:min-h-0">
-          <EventTicker events={events} />
+          <EventTicker events={events} timezone={health?.timezone ?? null} />
         </div>
       </div>
     </div>

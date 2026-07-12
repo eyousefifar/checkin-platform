@@ -100,3 +100,21 @@ export function dateTimeInZone(
     return "—";
   }
 }
+
+/**
+ * Format a WS epoch-seconds timestamp as `HH:MM:SS` in the named zone.
+ * Invalid/missing values return em dash — never browser-local time.
+ */
+export function timeFromEpochSeconds(
+  epochSeconds: number | null | undefined,
+  timeZone: string | null | undefined,
+): string {
+  if (timeZone == null || timeZone === "") return "—";
+  if (epochSeconds == null || !Number.isFinite(epochSeconds)) return "—";
+  // Accept seconds; reject values that look like milliseconds by magnitude only
+  // if absurd — WS contract is seconds.
+  const ms = epochSeconds * 1000;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "—";
+  return timeInZone(d.toISOString(), timeZone);
+}

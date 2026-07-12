@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { calendarDateInZone, dateTimeInZone, timeInZone } from "./dateTime";
+import {
+  calendarDateInZone,
+  dateTimeInZone,
+  timeFromEpochSeconds,
+  timeInZone,
+} from "./dateTime";
 
 describe("dateTime helpers", () => {
   afterEach(() => {
@@ -58,5 +63,16 @@ describe("dateTime helpers", () => {
     vi.setSystemTime(new Date("2026-07-12T22:30:00.000Z"));
     expect(calendarDateInZone(new Date(), "Asia/Tehran")).toBe("2026-07-13");
     expect(calendarDateInZone(new Date(), "UTC")).toBe("2026-07-12");
+  });
+
+  it("timeFromEpochSeconds formats WS timestamps without browser-local fallback", () => {
+    // 2026-07-12T20:00:00Z
+    const epoch = Math.floor(Date.parse("2026-07-12T20:00:00.000Z") / 1000);
+    expect(timeFromEpochSeconds(epoch, "UTC")).toBe("20:00:00");
+    expect(timeFromEpochSeconds(epoch, "Asia/Tehran")).toBe("23:30:00");
+    expect(timeFromEpochSeconds(epoch, null)).toBe("—");
+    expect(timeFromEpochSeconds(epoch, undefined)).toBe("—");
+    expect(timeFromEpochSeconds(null, "UTC")).toBe("—");
+    expect(timeFromEpochSeconds(Number.NaN, "UTC")).toBe("—");
   });
 });

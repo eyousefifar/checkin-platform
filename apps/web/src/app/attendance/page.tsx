@@ -1,11 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { API_URL, api, getToken } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { useHealth } from "@/hooks/useHealth";
 import { calendarDateInZone, timeInZone } from "@/lib/dateTime";
-import type { DailyRow } from "@/lib/types";
+import type { DailyRow, RawAttendanceEvent } from "@/lib/types";
 
 export default function AttendancePage() {
   const { data: health, loading: healthLoading, error: healthError } = useHealth();
@@ -17,8 +24,12 @@ export default function AttendancePage() {
   const dateInitializedRef = useRef(false);
   const [status, setStatus] = useState("all");
   const [rows, setRows] = useState<DailyRow[]>([]);
+  const [events, setEvents] = useState<RawAttendanceEvent[]>([]);
   const [error, setError] = useState("");
+  const [eventsError, setEventsError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const requestGenRef = useRef(0);
 
   useEffect(() => {
     if (!timezone || dateInitializedRef.current) return;
@@ -28,16 +39,48 @@ export default function AttendancePage() {
 
   const load = useCallback(async () => {
     if (!date) return;
+    const gen = ++requestGenRef.current;
     setLoading(true);
     setError("");
-    try {
-      const data = await api<DailyRow[]>(`/api/attendance/daily?date=${date}`);
-      setRows(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    } finally {
-      setLoading(false);
+    setEventsError("");
+    // Collapse expansions when the selected day changes.
+    setExpanded(new Set());
+
+    const dailyP = api<DailyRow[]>(`/api/attendance/daily?date=${date}`);
+    const eventsP = api<RawAttendanceEvent[]>(
+      `/api/attendance/events?date=${date}`,
+    );
+
+    const [dailyResult, eventsResult] = await Promise.allSettled([
+      dailyP,
+      eventsP,
+    ]);
+
+    if (gen !== requestGenRef.current) {
+      // Stale date response — do not overwrite current state.
+      return;
     }
+
+    if (dailyResult.status === "fulfilled") {
+      setRows(dailyResult.value);
+    } else {
+      const reason = dailyResult.reason;
+      setError(reason instanceof Error ? reason.message : "Failed");
+      setRows([]);
+    }
+
+    if (eventsResult.status === "fulfilled") {
+      setEvents(eventsResult.value);
+      setEventsError("");
+    } else {
+      const reason = eventsResult.reason;
+      setEvents([]);
+      setEventsError(
+        reason instanceof Error ? reason.message : "Failed to load events",
+      );
+    }
+
+    setLoading(false);
   }, [date]);
 
   useEffect(() => {
@@ -48,6 +91,34 @@ export default function AttendancePage() {
     if (status === "all") return rows;
     return rows.filter((r) => r.status === status);
   }, [rows, status]);
+
+  const eventsByEmployee = useMemo(() => {
+    const map = new Map<number, RawAttendanceEvent[]>();
+    for (const ev of events) {
+      if (ev.employee_id == null) continue;
+      const list = map.get(ev.employee_id);
+      if (list) list.push(ev);
+      else map.set(ev.employee_id, [ev]);
+    }
+    // API returns newest-first; detail rows show oldest-to-newest.
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        if (a.ts < b.ts) return -1;
+        if (a.ts > b.ts) return 1;
+        return a.id - b.id;
+      });
+    }
+    return map;
+  }, [events]);
+
+  function toggleExpand(employeeId: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(employeeId)) next.delete(employeeId);
+      else next.add(employeeId);
+      return next;
+    });
+  }
 
   async function exportCsv() {
     if (!date) return;
@@ -144,8 +215,22 @@ export default function AttendancePage() {
           </div>
 
           {error && (
-            <div className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red">
+            <div
+              className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
+              role="alert"
+            >
               {error}
+            </div>
+          )}
+
+          {eventsError && (
+            <div
+              className="mb-4 border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
+              role="status"
+              data-testid="events-load-error"
+            >
+              Raw events unavailable: {eventsError}. Daily aggregates remain
+              usable.
             </div>
           )}
 
@@ -153,6 +238,9 @@ export default function AttendancePage() {
             <table className="w-full text-left text-sm">
               <thead className="border-b border-hairline bg-card text-[10px] uppercase tracking-label text-muted">
                 <tr>
+                  <th className="px-4 py-3 w-12">
+                    <span className="sr-only">Details</span>
+                  </th>
                   <th className="px-4 py-3">Code</th>
                   <th className="px-4 py-3">Name</th>
                   <th className="px-4 py-3">First in</th>
@@ -165,49 +253,130 @@ export default function AttendancePage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-muted">
+                    <td colSpan={8} className="px-4 py-8 text-muted">
                       Loading…
                     </td>
                   </tr>
                 )}
                 {!loading && filtered.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-muted">
+                    <td colSpan={8} className="px-4 py-8 text-muted">
                       No rows for this day.
                     </td>
                   </tr>
                 )}
-                {filtered.map((r) => (
-                  <tr key={r.employee_id} className="border-b border-hairline/60">
-                    <td className="px-4 py-3 font-mono text-xs">
-                      {r.employee_code}
-                    </td>
-                    <td className="px-4 py-3 text-ink">{r.full_name}</td>
-                    <td
-                      className="px-4 py-3 font-mono text-xs text-body"
-                      data-testid={`first-in-${r.employee_id}`}
-                    >
-                      {timeInZone(r.first_in, zone)}
-                    </td>
-                    <td
-                      className="px-4 py-3 font-mono text-xs text-body"
-                      data-testid={`last-out-${r.employee_id}`}
-                    >
-                      {timeInZone(r.last_out, zone)}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs">
-                      {r.duration_minutes != null
-                        ? `${r.duration_minutes}m`
-                        : "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={r.status} />
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-muted">
-                      {r.check_in_count}/{r.check_out_count}
-                    </td>
-                  </tr>
-                ))}
+                {!loading &&
+                  filtered.map((r) => {
+                    const isOpen = expanded.has(r.employee_id);
+                    const detailId = `attendance-detail-${r.employee_id}`;
+                    const rowEvents = eventsByEmployee.get(r.employee_id) ?? [];
+                    return (
+                      <Fragment key={r.employee_id}>
+                        <tr className="border-b border-hairline/60">
+
+                          <td className="px-4 py-3">
+                            <button
+                              type="button"
+                              aria-expanded={isOpen}
+                              aria-controls={detailId}
+                              onClick={() => toggleExpand(r.employee_id)}
+                              className="border border-hairline px-2 py-1 text-[10px] font-bold uppercase tracking-label text-body hover:text-ink"
+                              data-testid={`expand-${r.employee_id}`}
+                            >
+                              {isOpen ? "Hide" : "Events"}
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs">
+                            {r.employee_code}
+                          </td>
+                          <td className="px-4 py-3 text-ink">{r.full_name}</td>
+                          <td
+                            className="px-4 py-3 font-mono text-xs text-body"
+                            data-testid={`first-in-${r.employee_id}`}
+                          >
+                            {timeInZone(r.first_in, zone)}
+                          </td>
+                          <td
+                            className="px-4 py-3 font-mono text-xs text-body"
+                            data-testid={`last-out-${r.employee_id}`}
+                          >
+                            {timeInZone(r.last_out, zone)}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs">
+                            {r.duration_minutes != null
+                              ? `${r.duration_minutes}m`
+                              : "—"}
+                          </td>
+                          <td className="px-4 py-3">
+                            <StatusBadge status={r.status} />
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-muted">
+                            {r.check_in_count}/{r.check_out_count}
+                          </td>
+                        </tr>
+                        {isOpen && (
+                          <tr className="border-b border-hairline/60 bg-soft">
+                            <td colSpan={8} className="px-4 py-3">
+                              <div
+                                id={detailId}
+                                role="region"
+                                aria-label={`Events for ${r.full_name}`}
+                                data-testid={`detail-${r.employee_id}`}
+                              >
+                                {eventsError ? (
+                                  <p
+                                    className="text-sm text-warning"
+                                    data-testid={`detail-error-${r.employee_id}`}
+                                  >
+                                    Could not load events for this day:{" "}
+                                    {eventsError}
+                                  </p>
+                                ) : rowEvents.length === 0 ? (
+                                  <p
+                                    className="text-sm text-muted"
+                                    data-testid={`detail-empty-${r.employee_id}`}
+                                  >
+                                    No events for this employee on this day.
+                                  </p>
+                                ) : (
+                                  <ul
+                                    className="space-y-1 font-mono text-xs text-body"
+                                    data-testid={`detail-events-${r.employee_id}`}
+                                  >
+                                    {rowEvents.map((ev) => (
+                                      <li
+                                        key={ev.id}
+                                        data-testid={`raw-event-${ev.id}`}
+                                        className="flex flex-wrap gap-x-3 gap-y-1"
+                                      >
+                                        <span data-field="time">
+                                          {timeInZone(ev.ts, zone)}
+                                        </span>
+                                        <span
+                                          data-field="kind"
+                                          className="uppercase"
+                                        >
+                                          {ev.kind.replace(/_/g, "-")}
+                                        </span>
+                                        <span data-field="camera">
+                                          {ev.camera_id}
+                                        </span>
+                                        <span data-field="score">
+                                          {ev.score != null
+                                            ? ev.score.toFixed(2)
+                                            : "—"}
+                                        </span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
               </tbody>
             </table>
           </div>

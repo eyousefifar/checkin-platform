@@ -63,8 +63,13 @@ vi.mock("@/components/CameraTile", () => ({
   },
 }));
 
+const tickerProps = vi.hoisted(() => ({ last: null as null | Record<string, unknown> }));
+
 vi.mock("@/components/EventTicker", () => ({
-  EventTicker: () => <div data-testid="events" />,
+  EventTicker: (props: Record<string, unknown>) => {
+    tickerProps.last = props;
+    return <div data-testid="events" data-timezone={String(props.timezone ?? "")} />;
+  },
 }));
 
 vi.mock("@/components/MetricPill", () => ({
@@ -113,6 +118,25 @@ describe("DashboardPage live state", () => {
     healthState.loading = true;
     healthState.error = null;
     cameraProps.last = null;
+    tickerProps.last = null;
+  });
+
+  it("passes health timezone into EventTicker without a second health fetch", () => {
+    healthState.data = healthWithPath("demo");
+    healthState.loading = false;
+    render(<DashboardPage />);
+    expect(screen.getByTestId("events").getAttribute("data-timezone")).toBe(
+      "UTC",
+    );
+    expect(tickerProps.last?.timezone).toBe("UTC");
+  });
+
+  it("passes null timezone to EventTicker while health is pending", () => {
+    healthState.data = null;
+    healthState.loading = true;
+    render(<DashboardPage />);
+    expect(screen.getByTestId("events").getAttribute("data-timezone")).toBe("");
+    expect(tickerProps.last?.timezone ?? null).toBeNull();
   });
 
   it("shows WS linked with camera unknown without a green online state", () => {
