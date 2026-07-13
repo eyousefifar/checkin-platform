@@ -1,3 +1,5 @@
+# Historical — superseded for active work by `GOAL-ADVISOR.md`.
+
 # Goal: Implement PKSP Check-In MVP end-to-end (plans 00→11)
 
 ## Goal kind

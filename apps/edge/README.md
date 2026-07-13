@@ -13,7 +13,7 @@ Binary: `target/release/pksp` (or `target/debug/pksp`).
 
 ## Run
 
-Monorepo root `.env` often sets Python-style:
+Monorepo root `.env` may use a relative SQLite URL:
 
 ```env
 DATABASE_URL=sqlite:///./data/pksp.db
@@ -22,7 +22,7 @@ DATA_DIR=./data
 
 Rust **correctly resolves** `sqlite:///./data/...` to a **relative** path (`./data/pksp.db`), not `/./data` (which used to hit a read-only root filesystem).
 
-### Recommended (explicit, isolated from Python DB)
+### Recommended (explicit, isolated database)
 
 From `apps/edge` or repo root:
 
@@ -104,7 +104,7 @@ capture (synthetic | ffmpeg RTSP)
 ./scripts/download_models.sh   # copies det_10g.onnx + w600k_r50.onnx into data/models/buffalo_l/
 ```
 
-**Re-enroll:** if Rust embeddings are not cosine-compatible with a prior Python gallery, re-enroll all staff under Rust. Do not mix mock and real embeddings for production punches.
+**Re-enroll:** do not mix mock and real embeddings for production punches.
 
 ## Smart scene
 
@@ -117,16 +117,13 @@ Disable with `ENABLE_SMART_SCENE=false` for pure quality→vote→FSM parity.
 
 ## Docs
 
-- `docs/deploy.md` — LAN runbook, systemd, backup, rollback  
+- `docs/deploy.md` — LAN runbook, systemd, backup, recovery
 - `docs/benches.md` — performance notes  
 - `docs/media-rust-bindings.md` — media stack options  
 
-## Rollback to Python
+## Recovery
 
-1. Stop `pksp serve` (Ctrl-C — graceful: vision + media stop).
-2. Start Python API: `cd apps/api && uvicorn app.main:app --port 8000`
-3. Start MediaMTX via `docker compose up -d mediamtx` as before.
-4. Keep the same `apps/web` env pointing at `:8000`.
+Stop `pksp serve`, restore the prior Rust binary and SQLite backup, then restart the service. Keep the same `apps/web` env pointing at `:8000`.
 
 ## Known limits
 
@@ -135,13 +132,11 @@ Disable with `ENABLE_SMART_SCENE=false` for pure quality→vote→FSM parity.
 - Real SCRFD decode is best-effort; validate embeddings before relying on old gallery  
 - Dual RTSP (vision + media) can load the camera — prefer lower-res vision stream when possible
 
-Python tree under `apps/api/` is intentionally retained.
-
 ## Models / ONNX
 
 Default `MOCK_VISION=true` needs no weights.  
 For real buffalo_l, place ONNX under `$DATA_DIR/models/buffalo_l/` and set `MOCK_VISION=false`.  
-If cosine parity with Python enrollments is not proven ≥0.99, **re-enroll** all staff under the Rust engine.
+Re-enroll employees when changing model or embedding settings.
 
 ## Tests
 

@@ -1,3 +1,5 @@
+# Historical — Python rollback instructions in this archived plan are no longer supported.
+
 # 12 — Migration & Cutover
 
 ## 1. Principles

@@ -41,20 +41,8 @@ port_free() {
     fi
     return $?
   fi
-  # Best effort: try binding via python
-  python3 - "$proto" "$port" <<'PY'
-import socket, sys
-proto, port = sys.argv[1], int(sys.argv[2])
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM if proto=="udp" else socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind(("127.0.0.1", port))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-sys.exit(0)
-PY
+  echo "lsof or ss is required to check temporary ports" >&2
+  return 1
 }
 
 pick_ports() {

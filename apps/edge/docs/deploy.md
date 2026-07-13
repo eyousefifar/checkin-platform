@@ -98,12 +98,11 @@ cp data/pksp-rust.db.bak data/pksp-rust.db
 tar xzf enroll-backup.tgz
 ```
 
-## Rollback to Python (< 10 min)
+## Recovery (< 10 min)
 
 1. Stop `pksp serve` (Ctrl-C).
-2. `docker compose up -d mediamtx`
-3. `cd apps/api && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000`
-4. Keep Next.js env pointing at `:8000`.
+2. Restore the previous Rust binary and SQLite backup.
+3. Restart `pksp serve`; keep Next.js pointed at `:8000`.
 
 ## systemd sketch
 
@@ -150,7 +149,7 @@ disk encryption instead of inventing a portability layer.
 
 ## Re-enroll (embedding space change)
 
-If Rust ONNX embeddings are not cosine-compatible with Python InsightFace (≥0.99), **re-enroll all employees** under Rust. Do not mix mock and real embeddings in one gallery for production punches.
+Re-enroll all employees after changing real-model embedding compatibility. Do not mix mock and real embeddings in one gallery for production punches.
 
 ## Real-model verification (operator-owned fixtures)
 

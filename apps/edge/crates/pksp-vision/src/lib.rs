@@ -75,7 +75,7 @@ pub trait FaceEngine: Send + Sync {
     ) -> Result<Vec<DetectedFace>, FaceError>;
 }
 
-/// Deterministic mock engine — intensity bucket embeddings (parity with Python mock).
+/// Deterministic mock engine — intensity bucket embeddings for offline demos.
 pub struct MockFaceEngine {
     dim: usize,
 }

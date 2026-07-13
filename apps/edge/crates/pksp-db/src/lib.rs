@@ -92,7 +92,7 @@ impl Settings {
     pub fn from_env() -> Self {
         let data_dir = PathBuf::from(env_or("DATA_DIR", "data"));
         // Prefer explicit DATABASE_URL; otherwise place DB under DATA_DIR.
-        // Python monorepo .env uses `sqlite:///./data/pksp.db` (relative) — resolve later.
+        // A three-slash SQLite URL may be relative; resolve it later.
         let db_default = format!("sqlite://{}/pksp-rust.db?mode=rwc", data_dir.display());
         let database_url = env_or("DATABASE_URL", &db_default);
         let (admin_password, admin_password_from_env) =

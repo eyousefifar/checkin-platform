@@ -1,3 +1,5 @@
+# Historical — superseded for active work by `GOAL-ADVISOR.md`.
+
 # Goal: Implement PKSP Check-In Rust port (carefully)
 
 ## Goal kind

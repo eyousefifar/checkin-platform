@@ -74,7 +74,7 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED — <reason>`, or
 
 ## Global boundaries
 
-- Do not modify `apps/api/**`, invoke its test suite, or use it as an oracle.
+- Do not reintroduce a Python backend; the Rust edge runtime is the only supported backend.
 - Preserve SQLite, flat cosine matching, Axum/Tokio/sqlx, Next.js 16,
   React 19, Tailwind 3, MediaMTX, native WebRTC, and the BMW M design language.
 - Never commit biometric fixture images, embeddings derived from employees,

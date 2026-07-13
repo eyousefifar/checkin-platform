@@ -1,12 +1,12 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return null;
   return localStorage.getItem("pksp_token");
 }
 
 export function setToken(token: string | null) {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
   if (token) localStorage.setItem("pksp_token", token);
   else localStorage.removeItem("pksp_token");
 }

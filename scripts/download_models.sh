@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download / export buffalo_l ONNX weights for Rust (and warm Python InsightFace cache).
+# Download / export buffalo_l ONNX weights for Rust.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,7 +20,7 @@ copy_if_present() {
   return 1
 }
 
-# 1) Prefer InsightFace cache if already present
+# 1) Prefer an existing model cache if present.
 for d in \
   "$HOME/.insightface/models/buffalo_l" \
   "$HOME/.insightface/models/buffalo_l/buffalo_l"
@@ -39,55 +39,15 @@ if [[ -d "$HOME/.insightface/models" ]]; then
   fi
 fi
 
-# 2) Python InsightFace download then copy
-if [[ ! -d "$ROOT/apps/api/.venv" ]]; then
-  echo "Create venv first: python3.11 -m venv apps/api/.venv && pip install -r apps/api/requirements.txt"
-  echo "Or place det_10g.onnx + w600k_r50.onnx in $DEST"
-  exit 1
-fi
-
-# shellcheck disable=SC1091
-source "$ROOT/apps/api/.venv/bin/activate"
-export DEST
-python - <<'PY'
-import os, shutil
-from pathlib import Path
-
-dest = Path(os.environ["DEST"])
-dest.mkdir(parents=True, exist_ok=True)
-print("Downloading / verifying InsightFace buffalo_l …")
-try:
-    from insightface.app import FaceAnalysis
-    providers = os.environ.get("ONNX_PROVIDERS", "CPUExecutionProvider").split(",")
-    providers = [p.strip() for p in providers if p.strip()] or ["CPUExecutionProvider"]
-    app = FaceAnalysis(name="buffalo_l", providers=providers)
-    app.prepare(ctx_id=-1, det_size=(640, 640))
-    print("OK: buffalo_l ready (providers=%s)" % providers)
-except Exception as e:
-    print("WARN: InsightFace download failed:", e)
-    raise SystemExit(1)
-
-home = Path.home() / ".insightface" / "models"
-found = list(home.rglob("det_10g.onnx"))
-if not found:
-    print("WARN: det_10g.onnx not found under", home)
-    raise SystemExit(1)
-src_dir = found[0].parent
-for name in ("det_10g.onnx", "w600k_r50.onnx"):
-    p = src_dir / name
-    if p.is_file():
-        shutil.copy2(p, dest / name)
-        print("copied", p, "->", dest / name)
-    else:
-        alt = list(src_dir.rglob(name))
-        if alt:
-            shutil.copy2(alt[0], dest / name)
-            print("copied", alt[0], "->", dest / name)
-        else:
-            print("MISSING", name)
-            raise SystemExit(1)
-print("OK:", list(dest.iterdir()))
-PY
+# 2) Download the official buffalo_l release archive.
+command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
+command -v unzip >/dev/null || { echo "unzip is required" >&2; exit 1; }
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fL --retry 3 -o "$tmp/buffalo_l.zip" \
+  https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+unzip -q "$tmp/buffalo_l.zip" -d "$tmp"
+copy_if_present "$tmp/buffalo_l" || { echo "buffalo_l archive is missing required models" >&2; exit 1; }
 
 ls -la "$DEST"
 echo "Rust: cargo build -p pksp-cli --features pksp-vision/ort  (from apps/edge)"
