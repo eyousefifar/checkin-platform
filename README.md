@@ -64,7 +64,18 @@ chmod +x scripts/*.sh
 ```
 
 Open **http://localhost:3000** (login password defaults to `change-me` for loopback).
-Enroll under **Configure** (guided capture), then show the same face to the mock RTSP source to test recognition.
+
+**Preloaded recognition demo** (public sample faces + looping RTSP slideshow):
+
+```bash
+./scripts/dev-stack.sh start testsrc          # bring API/media up
+./scripts/seed_demo_faces.sh                  # download faces, enroll DEMO-*, build video
+SAMPLE=./data/demo-rtsp/demo_faces.mp4 ./scripts/dev-stack.sh start sample
+```
+
+Monitor should label **Barack Obama (demo)**, **Joe Biden (demo)**, and **Lena (demo)** as the slideshow cycles. Face images stay under `data/` (gitignored).
+
+Or enroll yourself under **Configure** (guided capture) and use `./scripts/dev-stack.sh start webcam`.
 
 Manual pieces (if you prefer separate terminals):
 
