@@ -1,21 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { timeInZone } from "@/lib/dateTime";
 
-export function MonoClock() {
-  const [t, setT] = useState("--:--:--.---");
+export function MonoClock({ timezone }: { timezone: string | null }) {
+  const [t, setT] = useState("--:--:--");
   useEffect(() => {
+    if (!timezone) {
+      setT("--:--:--");
+      return;
+    }
     const tick = () => {
-      const d = new Date();
-      const pad = (n: number, w = 2) => String(n).padStart(w, "0");
-      setT(
-        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`,
-      );
+      setT(timeInZone(new Date().toISOString(), timezone));
     };
     tick();
-    const id = setInterval(tick, 50);
+    const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [timezone]);
   return (
     <span className="font-mono text-xs tabular-nums tracking-wider text-muted">
       {t}

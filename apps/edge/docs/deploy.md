@@ -9,17 +9,15 @@
 # 2. Models (real vision)
 export DATA_DIR=./data
 ./scripts/download_models.sh
-# Build with: cargo build -p pksp-cli --release --features ort
-# Or: cd apps/edge && cargo build --release -p pksp-cli
-# Note: enable ort feature on pksp-vision via: cargo build -p pksp-cli --features pksp-vision/ort
+cd apps/edge && cargo build --release -p pksp-cli && cd ../..
 
 # 3. Env (owner-only secrets; never put camera passwords in RTSP user-info in git)
 umask 077
 export DATABASE_URL="sqlite:///./data/pksp-rust.db?mode=rwc"
 export DATA_DIR=./data
 chmod 700 "$DATA_DIR" 2>/dev/null || true
-export MOCK_VISION=true          # theater
-# export MOCK_VISION=false       # real faces when models + ort ready
+export APP_TIMEZONE=Asia/Tehran
+export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
 export ENABLE_SMART_SCENE=true
 export ZONE_CONFIG_DIR=./configs
 export BIND_ADDR=127.0.0.1:8000  # non-loopback requires explicit ADMIN_PASSWORD + JWT_SECRET (≥32)
@@ -147,24 +145,38 @@ Direct-run (non-systemd) operators should begin the shell session with `umask 07
 before creating `DATA_DIR` or the database. On non-Unix hosts, rely on OS ACLs /
 disk encryption instead of inventing a portability layer.
 
-## Re-enroll (embedding space change)
+## Remove pre-production mock data and re-enroll
 
-Re-enroll all employees after changing real-model embedding compatibility. Do not mix mock and real embeddings in one gallery for production punches.
+With the service stopped, retain employees/images but remove invalid attendance and templates:
+
+```bash
+stamp="$(date +%Y%m%d-%H%M%S)"
+cp data/pksp-rust.db "data/pksp-rust.db.pre-real-$stamp.bak"
+sqlite3 data/pksp-rust.db 'BEGIN; DELETE FROM attendance_events; DELETE FROM employee_embeddings; COMMIT;'
+```
+
+Re-enroll each employee with at least five usable real images. Keep the backup until private camera validation passes.
 
 ## Real-model verification (operator-owned fixtures)
 
 Do **not** commit face images or embeddings. Locally:
 
 ```bash
-# Directory contains only private fixtures + manifest.json
-# { "images": [ { "file": "a.jpg", "faces": 1, "expect_embedding": true }, ... ] }
+# Directory contains only private fixtures + manifest.json. Each enrolled identity
+# needs >=5 quality-passing frames; query frames are measured at the production
+# threshold/margin, and unregistered frames must never be accepted.
+# { "images": [
+#   { "file": "alice-enroll-1.jpg", "faces": 1, "expect_embedding": true, "identity": "alice", "role": "enroll" },
+#   { "file": "alice-query-1.jpg",  "faces": 1, "expect_embedding": true, "identity": "alice", "role": "query" },
+#   { "file": "visitor-1.jpg",      "faces": 1, "expect_embedding": true, "role": "unregistered" }
+# ] }
 export PKSP_VISION_FIXTURE_DIR=/path/to/private/fixtures
 cd apps/edge
-cargo test -p pksp-vision --features ort --locked real_model -- --ignored
+cargo test -p pksp-vision --locked real_model -- --ignored
 ```
 
 Blank-frame smoke (models present, no fixtures):  
-`cargo test -p pksp-vision --features ort --locked real_model_blank_frame`
+`cargo test -p pksp-vision --locked real_model_blank_frame`
 
 ## Known limits
 

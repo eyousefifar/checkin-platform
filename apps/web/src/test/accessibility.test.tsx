@@ -46,6 +46,16 @@ describe("AppShell mobile navigation", () => {
         </a>
       ),
     }));
+    vi.doMock("@/hooks/useHealth", () => ({
+      HealthProvider: ({ children }: { children: React.ReactNode }) => children,
+      useHealth: () => ({ data: { timezone: "Asia/Tehran" } }),
+    }));
+    vi.doMock("@/hooks/useLiveWs", () => ({
+      LiveWsProvider: ({ children }: { children: React.ReactNode }) => children,
+    }));
+    vi.doMock("@/hooks/useCameraSessions", () => ({
+      CameraSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
+    }));
 
     const { AppShell } = await import("@/components/AppShell");
     render(
@@ -78,7 +88,8 @@ const attHealth = vi.hoisted(() => ({
     status: "ok",
     timezone: "UTC",
     vision_ready: true,
-    vision_provider: "mock",
+    vision_model: "buffalo_l" as const,
+    vision_provider: "test",
     gallery_size: 0,
     cameras: [] as never[],
     media: {

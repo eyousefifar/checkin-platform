@@ -1,5 +1,7 @@
 //! Employee DELETE / PATCH contracts and gallery invalidation.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use pksp_api::{app, AppState};
@@ -8,7 +10,7 @@ use pksp_db::{
     bump_gallery_version, connect_pool, create_employee, gallery_version, save_embedding, Settings,
 };
 use pksp_media::MediaStatus;
-use pksp_vision::{reload_gallery, Gallery, MockFaceEngine};
+use pksp_vision::{reload_gallery, Gallery};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -48,9 +50,7 @@ fn test_settings(db: &TestDb) -> Settings {
     settings.jwt_secret = "test-jwt-secret-for-employee-contract".into();
     settings.jwt_ttl_hours = 1;
     settings.cors_origins = vec!["http://localhost:3000".into()];
-    settings.mock_vision = true;
     settings.vision_enabled = false;
-    settings.require_real_vision = false;
     settings.camera_upsert = true;
     settings.cam_out_rtsp = String::new();
     settings.embedding_dim = 8;
@@ -60,8 +60,7 @@ fn test_settings(db: &TestDb) -> Settings {
 async fn test_state(db: &TestDb) -> AppState {
     let settings = Arc::new(test_settings(db));
     let pool = connect_pool(&settings).await.expect("connect_pool");
-    let engine: Arc<dyn pksp_vision::FaceEngine> =
-        Arc::new(MockFaceEngine::new(settings.embedding_dim));
+    let engine = common::test_engine(settings.embedding_dim);
     let gallery = Arc::new(RwLock::new(Gallery::empty(
         settings.match_threshold,
         settings.match_margin,
@@ -112,7 +111,7 @@ async fn seed_gallery_employee(state: &AppState, code: &str, name: &str) -> i64 
     let dim = state.settings.embedding_dim;
     let vec: Vec<f32> = (0..dim).map(|i| (i as f32 + 1.0) * 0.1).collect();
     let blob = pack_embedding(&vec, dim).unwrap();
-    save_embedding(&state.pool, id, &blob, dim, 1, "test")
+    save_embedding(&state.pool, id, &blob, dim, 5, pksp_vision::VISION_MODEL)
         .await
         .unwrap();
     // Image row so counts can be asserted after soft-delete.

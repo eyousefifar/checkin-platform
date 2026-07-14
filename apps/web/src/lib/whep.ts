@@ -9,84 +9,75 @@ export function whepUrl(base: string, path: string): string {
   return `${b}/${p}/whep`;
 }
 
-function waitIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
+function waitIceGathering(pc: RTCPeerConnection, timeoutMs = 750): Promise<void> {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(), timeoutMs);
-    pc.onicegatheringstatechange = () => {
+    const done = () => {
+      clearTimeout(timer);
+      pc.removeEventListener("icegatheringstatechange", onChange);
+      resolve();
+    };
+    const onChange = () => {
       if (pc.iceGatheringState === "complete") {
-        clearTimeout(t);
-        resolve();
+        done();
       }
     };
+    const timer = setTimeout(done, timeoutMs);
+    pc.addEventListener("icegatheringstatechange", onChange);
   });
 }
 
 export type WhepHandle = {
   pc: RTCPeerConnection;
+  stream: MediaStream;
   close: () => void;
 };
 
-export async function connectWhep(
-  endpoint: string,
-  video: HTMLVideoElement,
-): Promise<WhepHandle> {
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  });
+export async function connectWhep(endpoint: string): Promise<WhepHandle> {
+  const pc = new RTCPeerConnection();
+  const stream = new MediaStream();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    pc.close();
+    stream.getTracks().forEach((track) => track.stop());
+  };
 
   pc.addTransceiver("video", { direction: "recvonly" });
-  pc.addTransceiver("audio", { direction: "recvonly" });
 
   pc.ontrack = (ev) => {
-    if (ev.streams[0]) {
-      video.srcObject = ev.streams[0];
-      // Surface track end as a DOM event so UI lifecycle can leave "playing"
-      // without owning the PeerConnection internals.
-      for (const track of ev.streams[0].getTracks()) {
-        track.addEventListener("ended", () => {
-          video.dispatchEvent(new Event("wheptrackended"));
-        });
-      }
-      void video.play().catch(() => {
-        /* autoplay policies — caller must not treat this as success */
-      });
+    if (!stream.getTracks().some((track) => track.id === ev.track.id)) {
+      stream.addTrack(ev.track);
     }
   };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await waitIceGathering(pc);
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceGathering(pc);
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/sdp",
-    },
-    body: pc.localDescription?.sdp ?? offer.sdp,
-  });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/sdp",
+      },
+      body: pc.localDescription?.sdp ?? offer.sdp,
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
 
-  if (!res.ok) {
-    pc.close();
-    throw new Error(`WHEP ${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      throw new Error(`WHEP ${res.status} ${res.statusText}`);
+    }
+
+    const answerSdp = await res.text();
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+    return { pc, stream, close };
+  } catch (error) {
+    close();
+    throw error;
   }
-
-  const answerSdp = await res.text();
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-  return {
-    pc,
-    close: () => {
-      try {
-        pc.close();
-      } catch {
-        /* ignore */
-      }
-      if (video.srcObject) {
-        const stream = video.srcObject as MediaStream;
-        stream.getTracks().forEach((t) => t.stop());
-        video.srcObject = null;
-      }
-    },
-  };
 }

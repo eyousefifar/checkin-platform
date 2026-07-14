@@ -1,10 +1,12 @@
 //! Live WebSocket transport tests — real loopback listener + tungstenite client.
 
+mod common;
+
 use futures_util::StreamExt;
 use pksp_api::{app, AppState};
 use pksp_db::{connect_pool, Settings};
 use pksp_media::MediaStatus;
-use pksp_vision::{Gallery, MockFaceEngine};
+use pksp_vision::Gallery;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -46,9 +48,7 @@ fn test_settings(db: &TestDb) -> Settings {
     settings.jwt_secret = "test-jwt-secret-for-websocket".into();
     settings.jwt_ttl_hours = 1;
     settings.cors_origins = vec!["http://localhost:3000".into()];
-    settings.mock_vision = true;
     settings.vision_enabled = false;
-    settings.require_real_vision = false;
     settings.camera_upsert = true;
     settings.cam_out_rtsp = String::new();
     settings
@@ -57,8 +57,7 @@ fn test_settings(db: &TestDb) -> Settings {
 async fn test_state_with_capacity(db: &TestDb, capacity: usize) -> AppState {
     let settings = Arc::new(test_settings(db));
     let pool = connect_pool(&settings).await.expect("connect_pool");
-    let engine: Arc<dyn pksp_vision::FaceEngine> =
-        Arc::new(MockFaceEngine::new(settings.embedding_dim));
+    let engine = common::test_engine(settings.embedding_dim);
     let gallery = Arc::new(RwLock::new(Gallery::empty(
         settings.match_threshold,
         settings.match_margin,

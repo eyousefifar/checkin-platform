@@ -116,6 +116,7 @@ export type HealthResponse = {
   status: string;
   timezone: string;
   vision_ready: boolean;
+  vision_model: "buffalo_l";
   vision_provider: string;
   gallery_size: number;
   cameras: HealthCamera[];

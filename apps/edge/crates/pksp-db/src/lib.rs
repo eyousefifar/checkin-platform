@@ -33,7 +33,6 @@ pub struct Settings {
     pub cam_in_direction: String,
     pub cam_out_direction: String,
     pub camera_upsert: bool,
-    pub mock_vision: bool,
     pub vision_enabled: bool,
     pub vision_target_fps: f64,
     pub match_threshold: f32,
@@ -48,7 +47,6 @@ pub struct Settings {
     pub cooldown_seconds: f64,
     pub min_dwell_seconds: f64,
     pub embedding_dim: usize,
-    pub model_name: String,
     pub enable_smart_scene: bool,
     pub walkby_min_dwell_frames: usize,
     /// Directory for zones.{camera_id}.json (empty → defaults only).
@@ -59,7 +57,6 @@ pub struct Settings {
     pub blur_min_var: f32,
     pub det_size: i32,
     pub onnx_providers: String,
-    pub require_real_vision: bool,
     pub vision_adaptive: bool,
     /// Preferred browser-safe H.264 RTSP (used when MEDIA_SOURCE_MODE=copy).
     pub cam_in_h264_rtsp: String,
@@ -112,30 +109,28 @@ impl Settings {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            app_timezone: env_or("APP_TIMEZONE", "UTC"),
-            cam_in_rtsp: env_or("CAM_IN_RTSP", "rtsp://127.0.0.1:8554/demo"),
+            app_timezone: env_or("APP_TIMEZONE", "Asia/Tehran"),
+            cam_in_rtsp: env_or("CAM_IN_RTSP", ""),
             cam_out_rtsp: env_or("CAM_OUT_RTSP", ""),
             cam_in_webrtc_path: env_or("CAM_IN_WEBRTC_PATH", "demo"),
             cam_out_webrtc_path: env_or("CAM_OUT_WEBRTC_PATH", "cam_out"),
             cam_in_direction: env_or("CAM_IN_DIRECTION", "bidirectional"),
             cam_out_direction: env_or("CAM_OUT_DIRECTION", "out"),
             camera_upsert: env_or("CAMERA_UPSERT", "true") != "false",
-            mock_vision: env_or("MOCK_VISION", "true") != "false",
             vision_enabled: env_or("VISION_ENABLED", "true") != "false",
             vision_target_fps: env_or("VISION_TARGET_FPS", "5").parse().unwrap_or(5.0),
-            match_threshold: env_or("MATCH_THRESHOLD", "0.45").parse().unwrap_or(0.45),
-            match_margin: env_or("MATCH_MARGIN", "0.08").parse().unwrap_or(0.08),
+            match_threshold: env_or("MATCH_THRESHOLD", "0.75").parse().unwrap_or(0.75),
+            match_margin: env_or("MATCH_MARGIN", "0.10").parse().unwrap_or(0.10),
             min_face_px: env_or("MIN_FACE_PX", "60").parse().unwrap_or(60),
             min_det_score: env_or("MIN_DET_SCORE", "0.5").parse().unwrap_or(0.5),
             iou_match_threshold: env_or("IOU_MATCH_THRESHOLD", "0.3").parse().unwrap_or(0.3),
             track_max_age_frames: env_or("TRACK_MAX_AGE_FRAMES", "10").parse().unwrap_or(10),
             vote_window: env_or("VOTE_WINDOW", "5").parse().unwrap_or(5),
             vote_min_hits: env_or("VOTE_MIN_HITS", "3").parse().unwrap_or(3),
-            min_enroll_images: env_or("MIN_ENROLL_IMAGES", "1").parse().unwrap_or(1),
+            min_enroll_images: env_or("MIN_ENROLL_IMAGES", "5").parse().unwrap_or(5),
             cooldown_seconds: env_or("COOLDOWN_SECONDS", "90").parse().unwrap_or(90.0),
             min_dwell_seconds: env_or("MIN_DWELL_SECONDS", "30").parse().unwrap_or(30.0),
             embedding_dim: env_or("EMBEDDING_DIM", "512").parse().unwrap_or(512),
-            model_name: env_or("MODEL_NAME", "buffalo_l"),
             enable_smart_scene: env_or("ENABLE_SMART_SCENE", "true") != "false",
             walkby_min_dwell_frames: env_or("WALKBY_MIN_DWELL_FRAMES", "3").parse().unwrap_or(3),
             zone_config_dir: {
@@ -150,11 +145,10 @@ impl Settings {
                     }
                 }
             },
-            pose_max_yaw: env_or("POSE_MAX_YAW", "0").parse().unwrap_or(0.0),
-            blur_min_var: env_or("BLUR_MIN_VAR", "0").parse().unwrap_or(0.0),
+            pose_max_yaw: env_or("POSE_MAX_YAW", "30").parse().unwrap_or(30.0),
+            blur_min_var: env_or("BLUR_MIN_VAR", "75").parse().unwrap_or(75.0),
             det_size: env_or("DET_SIZE", "640").parse().unwrap_or(640),
             onnx_providers: env_or("ONNX_PROVIDERS", "CPUExecutionProvider"),
-            require_real_vision: env_or("REQUIRE_REAL_VISION", "false") == "true",
             vision_adaptive: env_or("VISION_ADAPTIVE", "false") == "true",
             cam_in_h264_rtsp: env_or("CAM_IN_H264_RTSP", ""),
             media_source_mode: env_or("MEDIA_SOURCE_MODE", "external"),
@@ -205,6 +199,12 @@ impl Settings {
     /// Fail closed before DB/media/worker startup when bind or secrets are unsafe.
     pub fn validate_startup(&self) -> Result<std::net::SocketAddr, String> {
         self.validate_enrollment_limits()?;
+        if self.cam_in_rtsp.trim().is_empty() {
+            return Err("CAM_IN_RTSP must be set for enabled camera cam_in".into());
+        }
+        if self.embedding_dim != 512 {
+            return Err("EMBEDDING_DIM must be 512 for buffalo_l".into());
+        }
         validate_bind_and_secrets(
             &self.bind_addr,
             &self.admin_password,
@@ -801,12 +801,16 @@ pub async fn deactivate_employee(
 pub async fn load_gallery_matrix(
     pool: &SqlitePool,
     dim: usize,
+    model_name: &str,
+    min_images: usize,
 ) -> Result<(Vec<i64>, Vec<String>, Vec<Vec<f32>>)> {
     let rows = sqlx::query(
         "SELECT e.id, e.full_name, emb.vector, emb.dim FROM employees e
          JOIN employee_embeddings emb ON emb.employee_id = e.id
-         WHERE e.is_active = 1",
+         WHERE e.is_active = 1 AND emb.model_name = ? AND emb.num_images_used >= ?",
     )
+    .bind(model_name)
+    .bind(min_images as i64)
     .fetch_all(pool)
     .await?;
     let mut ids = Vec::new();
@@ -1299,6 +1303,48 @@ pub async fn embedding_exists(pool: &SqlitePool, employee_id: i64) -> Result<boo
 }
 
 #[cfg(test)]
+mod gallery_model_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn gallery_loads_only_the_expected_model() {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("pksp-gallery-model-{id}"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("test.db");
+        let mut settings = Settings::from_env();
+        let abs = db_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        settings.database_url = format!("sqlite:////{abs}?mode=rwc");
+        settings.data_dir = data_dir.clone();
+        let pool = connect_pool(&settings).await.unwrap();
+
+        let real = create_employee(&pool, "R", "Real", None).await.unwrap();
+        let stale = create_employee(&pool, "S", "Stale", None).await.unwrap();
+        let blob = pksp_core::pack_embedding(&[1.0, 0.0], 2).unwrap();
+        save_embedding(&pool, real, &blob, 2, 5, "buffalo_l")
+            .await
+            .unwrap();
+        save_embedding(&pool, stale, &blob, 2, 5, "legacy")
+            .await
+            .unwrap();
+
+        let (ids, names, vectors) = load_gallery_matrix(&pool, 2, "buffalo_l", 5).await.unwrap();
+        assert_eq!(ids, vec![real]);
+        assert_eq!(names, vec!["Real"]);
+        assert_eq!(vectors.len(), 1);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+}
+
+#[cfg(test)]
 mod path_tests {
     use super::resolve_sqlite_path;
     use std::path::PathBuf;
@@ -1426,6 +1472,25 @@ mod enrollment_settings_tests {
         assert_eq!(s.max_enroll_files, 10);
         assert_eq!(s.max_enroll_file_bytes, 5_242_880);
         assert_eq!(s.max_enroll_upload_bytes, 33_554_432);
+        assert_eq!(s.min_enroll_images, 5);
+        assert_eq!(s.match_threshold, 0.75);
+        assert_eq!(s.match_margin, 0.10);
+        assert_eq!(s.pose_max_yaw, 30.0);
+        assert_eq!(s.blur_min_var, 75.0);
+        assert_eq!(s.app_timezone, "Asia/Tehran");
+    }
+
+    #[test]
+    fn startup_rejects_missing_rtsp_and_wrong_embedding_dimension() {
+        let mut s = Settings::from_env();
+        s.bind_addr = "127.0.0.1:8000".into();
+        s.vision_enabled = true;
+        s.cam_in_rtsp.clear();
+        assert!(s.validate_startup().unwrap_err().contains("CAM_IN_RTSP"));
+
+        s.cam_in_rtsp = "rtsp://127.0.0.1:8554/cam".into();
+        s.embedding_dim = 16;
+        assert!(s.validate_startup().unwrap_err().contains("EMBEDDING_DIM"));
     }
 }
 

@@ -78,6 +78,7 @@ pub async fn health(State(state): State<AppState>) -> Result<Json<Value>, AppErr
         "status": "ok",
         "timezone": state.settings.app_timezone,
         "vision_ready": state.engine.ready(),
+        "vision_model": pksp_vision::VISION_MODEL,
         "vision_provider": state.engine.execution_provider(),
         "gallery_size": g.size(),
         "cameras": cameras,

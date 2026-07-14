@@ -1,4 +1,4 @@
-//! Vision: FaceEngine (mock | ort), gallery, capture, worker pipeline.
+//! Vision: buffalo_l ONNX engine, gallery, RTSP capture, worker pipeline.
 
 mod align;
 mod scrfd;
@@ -11,10 +11,10 @@ pub use scrfd::{
 };
 
 use pksp_core::{
-    assign_tracks, commit_eligible, evaluate_vote, hud_state, l2_normalize, match_top1,
-    mean_l2_embedding, pack_embedding, prefer_commit_track, quality_gate_extended,
-    refine_hud_after_identity, should_vote, track_zone, trajectory_is_walkby, Detection, HudState,
-    IdentityAttempt, MatchResult, SkipReason, TrackerState, ZoneMap,
+    assign_tracks, commit_eligible, evaluate_vote, hud_state, match_top1, mean_l2_embedding,
+    pack_embedding, prefer_commit_track, quality_gate_extended, refine_hud_after_identity,
+    should_vote, track_zone, trajectory_is_walkby, Detection, HudState, IdentityAttempt,
+    MatchResult, SkipReason, TrackerState, ZoneMap,
 };
 use pksp_db::{
     commit_identity, daily_attendance_metrics, load_gallery_matrix, local_date_str, CommitOutcome,
@@ -35,6 +35,7 @@ pub use zones::load_zones_for_camera;
 
 /// WebSocket / hub event (JSON object).
 pub type WsEvent = serde_json::Value;
+pub const VISION_MODEL: &str = "buffalo_l";
 
 #[derive(Debug, Clone)]
 pub struct DetectedFace {
@@ -75,83 +76,6 @@ pub trait FaceEngine: Send + Sync {
     ) -> Result<Vec<DetectedFace>, FaceError>;
 }
 
-/// Deterministic mock engine — intensity bucket embeddings for offline demos.
-pub struct MockFaceEngine {
-    dim: usize,
-}
-
-impl MockFaceEngine {
-    pub fn new(dim: usize) -> Self {
-        Self { dim }
-    }
-
-    fn vec_for_mean(&self, mean: f32) -> Vec<f32> {
-        let bucket = (mean as i32).rem_euclid(50) as u64;
-        let mut s = bucket.wrapping_add(7);
-        let mut v = Vec::with_capacity(self.dim);
-        for _ in 0..self.dim {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let f = ((s >> 33) as f32) / (u32::MAX as f32) - 0.5;
-            v.push(f);
-        }
-        let mut s2 = ((mean * 10.0) as i32).rem_euclid(1000) as u64;
-        for x in &mut v {
-            s2 = s2.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let noise = (((s2 >> 33) as f32) / (u32::MAX as f32) - 0.5) * 0.02;
-            *x += noise;
-        }
-        l2_normalize(&v)
-    }
-}
-
-impl FaceEngine for MockFaceEngine {
-    fn ready(&self) -> bool {
-        true
-    }
-    fn model_name(&self) -> &str {
-        "mock"
-    }
-    fn execution_provider(&self) -> &str {
-        "mock"
-    }
-    fn detect_and_embed(
-        &self,
-        width: u32,
-        height: u32,
-        bgr: &[u8],
-    ) -> Result<Vec<DetectedFace>, FaceError> {
-        if width < 20 || height < 20 || bgr.is_empty() {
-            return Ok(vec![]);
-        }
-        let mean = bgr.iter().map(|&x| x as f32).sum::<f32>() / bgr.len() as f32;
-        if mean < 5.0 {
-            return Ok(vec![]);
-        }
-        let margin = 0.15f32;
-        let x1 = width as f32 * margin;
-        let y1 = height as f32 * margin;
-        let x2 = width as f32 * (1.0 - margin);
-        let y2 = height as f32 * (1.0 - margin);
-        // Synthetic landmarks roughly centered
-        let cx = (x1 + x2) * 0.5;
-        let cy = (y1 + y2) * 0.5;
-        let ew = (x2 - x1) * 0.15;
-        let landmarks = Some([
-            [cx - ew, cy - (y2 - y1) * 0.1],
-            [cx + ew, cy - (y2 - y1) * 0.1],
-            [cx, cy],
-            [cx - ew * 0.8, cy + (y2 - y1) * 0.15],
-            [cx + ew * 0.8, cy + (y2 - y1) * 0.15],
-        ]);
-        Ok(vec![DetectedFace {
-            bbox: (x1, y1, x2, y2),
-            det_score: 0.99,
-            embedding: self.vec_for_mean(mean),
-            landmarks,
-        }])
-    }
-}
-
 /// ONNX buffalo_l engine — ready when model files load successfully.
 pub struct OrtFaceEngine {
     pub ready: bool,
@@ -168,10 +92,6 @@ impl OrtFaceEngine {
         let det = model_dir.join("det_10g.onnx");
         let rec = model_dir.join("w600k_r50.onnx");
         if det.is_file() && rec.is_file() {
-            // Session construction deferred until ort is linked in a follow-up build.
-            // Presence of both weights marks ready; detect_and_embed still needs ort runtime.
-            // For now mark not-ready so mock remains default unless we implement ort path.
-            // Attempt: if ort feature not compiled, stay unavailable.
             match try_init_ort(model_dir, det_size, providers) {
                 Ok(provider) => Self {
                     ready: true,
@@ -231,50 +151,9 @@ fn try_init_ort(
     if !det.is_file() || !rec.is_file() {
         return Err("model files missing".into());
     }
-    // ort sessions are initialized lazily on first detect when feature available.
-    // Without the ort crate linked, we report unavailable so MOCK remains safe.
-    if std::env::var("PKSP_FORCE_ORT_READY").as_deref() == Ok("1") {
-        return Ok(applied_execution_provider(providers));
-    }
-    // Real ort path: implemented in engine_ort module when dependency present.
-    ort_runtime::try_load(model_dir, providers)
+    ort_sessions::load(model_dir, providers)
 }
 
-mod ort_runtime {
-    use std::path::Path;
-    use std::sync::OnceLock;
-
-    static LOADED: OnceLock<Result<String, String>> = OnceLock::new();
-
-    pub fn try_load(model_dir: &Path, providers: &str) -> Result<String, String> {
-        LOADED
-            .get_or_init(|| load_inner(model_dir, providers))
-            .clone()
-    }
-
-    fn load_inner(model_dir: &Path, providers: &str) -> Result<String, String> {
-        // When `ort` is available (dependency), this opens sessions.
-        // Currently we use a soft probe: files present + optional ort crate.
-        #[cfg(feature = "ort")]
-        {
-            return super::ort_sessions::load(model_dir, providers);
-        }
-        #[cfg(not(feature = "ort"))]
-        {
-            let _ = model_dir;
-            Err(format!(
-                "ort feature not enabled (providers={providers}); build with --features ort"
-            ))
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn clear_for_tests() {
-        // OnceLock cannot clear; tests use separate process.
-    }
-}
-
-#[cfg(feature = "ort")]
 mod ort_sessions {
     use super::DetectedFace;
     use pksp_core::l2_normalize;
@@ -454,7 +333,7 @@ impl FaceEngine for OrtFaceEngine {
         self.ready
     }
     fn model_name(&self) -> &str {
-        "buffalo_l"
+        VISION_MODEL
     }
     fn execution_provider(&self) -> &str {
         &self.provider
@@ -463,15 +342,7 @@ impl FaceEngine for OrtFaceEngine {
         if !self.ready {
             return Err(FaceError::NotReady);
         }
-        #[cfg(feature = "ort")]
-        {
-            return ort_sessions::detect_and_embed(w, h, bgr, self.det_size);
-        }
-        #[cfg(not(feature = "ort"))]
-        {
-            let _ = (w, h, bgr, self.det_size);
-            Err(FaceError::NotReady)
-        }
+        ort_sessions::detect_and_embed(w, h, bgr, self.det_size)
     }
 }
 
@@ -517,7 +388,13 @@ pub async fn reload_gallery(
     gallery: &Arc<RwLock<Gallery>>,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    let (ids, names, matrix) = load_gallery_matrix(pool, settings.embedding_dim).await?;
+    let (ids, names, matrix) = load_gallery_matrix(
+        pool,
+        settings.embedding_dim,
+        VISION_MODEL,
+        settings.min_enroll_images,
+    )
+    .await?;
     let version = pksp_db::gallery_version(pool).await?;
     let mut g = gallery.write().unwrap();
     g.employee_ids = ids;
@@ -550,7 +427,7 @@ impl VisionHandle {
     }
 }
 
-/// Start vision process loops (synthetic or RTSP depending on settings).
+/// Start one RTSP vision loop per configured camera.
 pub fn start_vision_worker(
     pool: SqlitePool,
     settings: Arc<Settings>,
@@ -559,7 +436,19 @@ pub fn start_vision_worker(
     tx: broadcast::Sender<WsEvent>,
     camera_ids: Vec<String>,
     camera_rtsps: HashMap<String, String>,
-) -> VisionHandle {
+) -> anyhow::Result<VisionHandle> {
+    if !engine.ready() {
+        anyhow::bail!("buffalo_l engine is not ready");
+    }
+    for camera_id in &camera_ids {
+        if camera_rtsps
+            .get(camera_id)
+            .is_none_or(|url| url.trim().is_empty())
+        {
+            anyhow::bail!("enabled camera {camera_id} has no RTSP URL");
+        }
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
     let metrics = Arc::new(RwLock::new(VisionMetrics::default()));
     let gallery_version = Arc::new(AtomicU64::new(0));
@@ -575,7 +464,7 @@ pub fn start_vision_worker(
         let metrics_c = metrics.clone();
         let zones = load_zones_for_camera(&settings.zone_config_dir, &cam_id);
         let zones_c = Arc::new(zones);
-        let rtsp = camera_rtsps.get(&cam_id).cloned().unwrap_or_default();
+        let rtsp = camera_rtsps[&cam_id].clone();
         let sem = infer_sem.clone();
         let cam = cam_id.clone();
         tokio::spawn(async move {
@@ -587,31 +476,11 @@ pub fn start_vision_worker(
         });
     }
 
-    VisionHandle {
+    Ok(VisionHandle {
         stop,
         metrics,
         gallery_version,
-    }
-}
-
-/// Backward-compatible alias.
-pub fn start_mock_worker(
-    pool: SqlitePool,
-    settings: Arc<Settings>,
-    engine: Arc<dyn FaceEngine>,
-    gallery: Arc<RwLock<Gallery>>,
-    tx: broadcast::Sender<WsEvent>,
-    camera_ids: Vec<String>,
-) -> VisionHandle {
-    start_vision_worker(
-        pool,
-        settings,
-        engine,
-        gallery,
-        tx,
-        camera_ids,
-        HashMap::new(),
-    )
+    })
 }
 
 /// Latest captured frame — one slot only (drop-old policy). Sequence identifies observations.
@@ -653,30 +522,23 @@ async fn process_loop(
     let mut fps_t0 = Instant::now();
     let mut target_fps = settings.vision_target_fps.max(0.5);
     let mut last_gallery_ver: u64 = gallery.read().unwrap().version;
-    // Seed overwritten on first frame; elapsed used for freeze/offline detection.
-    #[allow(unused_assignments)]
-    let mut last_frame_ts = Instant::now();
     let mut last_processed_sequence: Option<u64> = None;
-    let mut synthetic_sequence: u64 = 0;
     let mut last_infer_err_log = Instant::now() - Duration::from_secs(60);
-    let use_rtsp = !settings.mock_vision && !rtsp_url.is_empty() && engine.ready();
 
-    // Shared latest frame for RTSP path
+    // Shared latest frame; capture drops old frames instead of queueing latency.
     let latest: LatestFrame = Arc::new(RwLock::new(None));
-    if use_rtsp {
-        let stop_cap = stop.clone();
-        let latest_c = latest.clone();
-        let ffmpeg = settings.ffmpeg_bin.clone();
-        let url = rtsp_url.clone();
-        let cam = camera_id.clone();
-        tokio::task::spawn_blocking(move || {
-            capture_ffmpeg_loop(&cam, &url, &ffmpeg, stop_cap, latest_c);
-        });
-    }
+    let stop_cap = stop.clone();
+    let latest_c = latest.clone();
+    let ffmpeg = settings.ffmpeg_bin.clone();
+    let url = rtsp_url.clone();
+    let cam = camera_id.clone();
+    tokio::task::spawn_blocking(move || {
+        capture_ffmpeg_loop(&cam, &url, &ffmpeg, stop_cap, latest_c);
+    });
 
     {
         let mut m = metrics.write().unwrap();
-        m.online.insert(camera_id.clone(), true);
+        m.online.insert(camera_id.clone(), false);
     }
 
     while !stop.load(Ordering::SeqCst) {
@@ -699,79 +561,51 @@ async fn process_loop(
             }
         }
 
-        let (w, h, bgr, sequence) = if use_rtsp {
-            let snap = latest.read().unwrap().clone();
-            match snap {
-                Some(frame) => {
-                    last_frame_ts = frame.captured_at;
-                    let age = frame.captured_at.elapsed().as_millis() as u64;
-                    let online = age < 2000;
-                    metrics
-                        .write()
-                        .unwrap()
-                        .online
-                        .insert(camera_id.clone(), online);
-                    if !online {
-                        let _ = tx.send(json!({
-                            "type": "camera_status",
-                            "camera_id": camera_id,
-                            "online": false,
-                            "last_frame_age_ms": age,
-                        }));
-                        continue;
-                    }
-                    // Fresh-but-unchanged frame: publish status only; no detect/vote.
-                    if !should_infer_sequence(last_processed_sequence, frame.sequence) {
-                        let _ = tx.send(json!({
-                            "type": "camera_status",
-                            "camera_id": camera_id,
-                            "online": true,
-                            "last_frame_age_ms": age,
-                        }));
-                        continue;
-                    }
-                    // Own the snapshot before marking processed.
-                    last_processed_sequence = Some(frame.sequence);
-                    (frame.width, frame.height, frame.bgr, frame.sequence)
-                }
-                None => {
-                    metrics
-                        .write()
-                        .unwrap()
-                        .online
-                        .insert(camera_id.clone(), false);
+        let (w, h, bgr, captured_at) = match latest.read().unwrap().clone() {
+            Some(frame) => {
+                let age = frame.captured_at.elapsed().as_millis() as u64;
+                let online = age < 2000;
+                metrics
+                    .write()
+                    .unwrap()
+                    .online
+                    .insert(camera_id.clone(), online);
+                if !online {
+                    let _ = tx.send(json!({
+                        "type": "camera_status",
+                        "camera_id": camera_id,
+                        "online": false,
+                        "last_frame_age_ms": age,
+                    }));
                     continue;
                 }
-            }
-        } else {
-            // Synthetic BGR frame — each tick is a new observation.
-            let w = 320u32;
-            let h = 320u32;
-            let phase = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
-            let intensity = (40 + ((phase as i32).wrapping_mul(17)).rem_euclid(180)) as u8;
-            let mut bgr = vec![intensity.saturating_sub(15); (w * h * 3) as usize];
-            for y in (h / 4)..(3 * h / 4) {
-                for x in (w / 4)..(3 * w / 4) {
-                    let i = ((y * w + x) * 3) as usize;
-                    bgr[i] = intensity;
-                    bgr[i + 1] = intensity.saturating_add(10);
-                    bgr[i + 2] = intensity.saturating_add(5);
+                // Fresh-but-unchanged frame: publish status only; no detect/vote.
+                if !should_infer_sequence(last_processed_sequence, frame.sequence) {
+                    let _ = tx.send(json!({
+                        "type": "camera_status",
+                        "camera_id": camera_id,
+                        "online": true,
+                        "last_frame_age_ms": age,
+                    }));
+                    continue;
                 }
+                last_processed_sequence = Some(frame.sequence);
+                (frame.width, frame.height, frame.bgr, frame.captured_at)
             }
-            synthetic_sequence = synthetic_sequence.wrapping_add(1);
-            last_frame_ts = Instant::now();
-            metrics
-                .write()
-                .unwrap()
-                .online
-                .insert(camera_id.clone(), true);
-            last_processed_sequence = Some(synthetic_sequence);
-            (w, h, bgr, synthetic_sequence)
+            None => {
+                metrics
+                    .write()
+                    .unwrap()
+                    .online
+                    .insert(camera_id.clone(), false);
+                let _ = tx.send(json!({
+                    "type": "camera_status",
+                    "camera_id": camera_id,
+                    "online": false,
+                }));
+                continue;
+            }
         };
-        let _ = sequence;
 
         let infer_t0 = Instant::now();
         let permit = match infer_sem.acquire().await {
@@ -839,7 +673,7 @@ async fn process_loop(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let age_ms = last_frame_ts.elapsed().as_millis() as u64;
+        let age_ms = captured_at.elapsed().as_millis() as u64;
         let _ = tx.send(json!({
             "type": "detections",
             "camera_id": camera_id,
@@ -1228,7 +1062,7 @@ async fn process_detected_faces(
 }
 
 /// Crop bbox to grayscale luma for blur/exposure quality extensions.
-fn crop_gray_luma(
+pub fn crop_gray_luma(
     bgr: &[u8],
     w: u32,
     h: u32,
@@ -1753,7 +1587,7 @@ mod frame_scheduling_tests {
             "counting"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -1787,7 +1621,7 @@ mod frame_scheduling_tests {
             "sleepy"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -1810,7 +1644,7 @@ mod frame_scheduling_tests {
             "panic"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -1832,7 +1666,7 @@ mod frame_scheduling_tests {
             "fail"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -1902,6 +1736,25 @@ mod frame_scheduling_tests {
         assert_eq!(processed, 2);
         // One vote per processed sequence (not per poll).
         assert_eq!(votes, 2, "at most one vote per processed sequence");
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_missing_rtsp_before_spawning() {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let settings = Arc::new(Settings::from_env());
+        let engine: Arc<dyn FaceEngine> = Arc::new(CountingEngine::new(512));
+        let gallery = Arc::new(RwLock::new(Gallery::empty(0.75, 0.10)));
+        let (tx, _) = broadcast::channel(1);
+        let result = start_vision_worker(
+            pool,
+            settings,
+            engine,
+            gallery,
+            tx,
+            vec!["cam_in".into()],
+            HashMap::new(),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2064,6 +1917,8 @@ mod enroll_tests {
         s.embedding_dim = 16;
         s.min_face_px = 10;
         s.min_det_score = 0.1;
+        s.pose_max_yaw = 0.0;
+        s.blur_min_var = 0.0;
         s.max_enroll_files = 10;
         s.max_enroll_file_bytes = 5_242_880;
         s.max_enroll_upload_bytes = 33_554_432;
@@ -2080,6 +1935,41 @@ mod enroll_tests {
         buf
     }
 
+    struct SingleFaceEngine {
+        dim: usize,
+    }
+
+    impl FaceEngine for SingleFaceEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            VISION_MODEL
+        }
+        fn execution_provider(&self) -> &str {
+            "test"
+        }
+        fn detect_and_embed(
+            &self,
+            width: u32,
+            height: u32,
+            bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            let mean = bgr.iter().map(|&x| x as f32).sum::<f32>() / bgr.len().max(1) as f32;
+            if mean < 5.0 {
+                return Ok(vec![]);
+            }
+            let mut embedding = vec![0.1; self.dim];
+            embedding[0] = mean / 255.0;
+            Ok(vec![DetectedFace {
+                bbox: (10.0, 10.0, width as f32 - 10.0, height as f32 - 10.0),
+                det_score: 0.99,
+                embedding: pksp_core::l2_normalize(&embedding),
+                landmarks: None,
+            }])
+        }
+    }
+
     struct MultiFaceEngine {
         dim: usize,
     }
@@ -2092,7 +1982,7 @@ mod enroll_tests {
             "multi"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -2133,7 +2023,7 @@ mod enroll_tests {
             "boom"
         }
         fn execution_provider(&self) -> &str {
-            "mock"
+            "test"
         }
         fn detect_and_embed(
             &self,
@@ -2162,7 +2052,9 @@ mod enroll_tests {
         let (_t, settings) = temp_settings(1);
         let pool = connect_pool(&settings).await.unwrap();
         let eid = create_employee(&pool, "E1", "Alice", None).await.unwrap();
-        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        let engine: Arc<dyn FaceEngine> = Arc::new(SingleFaceEngine {
+            dim: settings.embedding_dim,
+        });
         let gallery = Arc::new(RwLock::new(Gallery::empty(0.45, 0.08)));
 
         let a = solid_png(80, 80, 120);
@@ -2209,7 +2101,9 @@ mod enroll_tests {
         let (_t, settings) = temp_settings(1);
         let pool = connect_pool(&settings).await.unwrap();
         let eid = create_employee(&pool, "E2", "Bob", None).await.unwrap();
-        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        let engine: Arc<dyn FaceEngine> = Arc::new(SingleFaceEngine {
+            dim: settings.embedding_dim,
+        });
 
         enroll_images(
             &pool,
@@ -2264,7 +2158,9 @@ mod enroll_tests {
         let (_t, settings) = temp_settings(2);
         let pool = connect_pool(&settings).await.unwrap();
         let eid = create_employee(&pool, "E3", "Cara", None).await.unwrap();
-        let engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        let engine: Arc<dyn FaceEngine> = Arc::new(SingleFaceEngine {
+            dim: settings.embedding_dim,
+        });
 
         // One usable image → embedding_ready false, no row
         let r = enroll_images(
@@ -2316,7 +2212,9 @@ mod enroll_tests {
         let (_t, settings) = temp_settings(1);
         let pool = connect_pool(&settings).await.unwrap();
         let eid = create_employee(&pool, "E4", "Dan", None).await.unwrap();
-        let ok_engine: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
+        let ok_engine: Arc<dyn FaceEngine> = Arc::new(SingleFaceEngine {
+            dim: settings.embedding_dim,
+        });
         enroll_images(
             &pool,
             &settings,
@@ -2373,12 +2271,14 @@ mod enroll_tests {
         let (_t, settings) = temp_settings(1);
         let pool = connect_pool(&settings).await.unwrap();
         let eid = create_employee(&pool, "E5", "Eve", None).await.unwrap();
-        let mock: Arc<dyn FaceEngine> = Arc::new(MockFaceEngine::new(settings.embedding_dim));
-        // Dark image → no_face via mock
+        let test_engine: Arc<dyn FaceEngine> = Arc::new(SingleFaceEngine {
+            dim: settings.embedding_dim,
+        });
+        // Dark image → no_face via deterministic test engine.
         let r = enroll_images(
             &pool,
             &settings,
-            mock,
+            test_engine,
             eid,
             vec![("dark.png".into(), solid_png(80, 80, 0))],
             None,

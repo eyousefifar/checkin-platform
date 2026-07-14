@@ -73,7 +73,8 @@ function makeHealth(cameras: HealthCamera[]): HealthResponse {
     status: "ok",
     timezone: "Asia/Tehran",
     vision_ready: true,
-    vision_provider: "mock",
+    vision_model: "buffalo_l",
+    vision_provider: "test",
     gallery_size: 0,
     cameras,
     media: {

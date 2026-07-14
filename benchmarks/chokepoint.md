@@ -9,9 +9,9 @@ scripts/chokepoint_benchmark.sh fetch
 Build and run the real Rust engine in an isolated database:
 
 ```bash
-cd apps/edge && cargo build -p pksp-cli --features ort && cd ../..
+cd apps/edge && cargo build -p pksp-cli && cd ../..
 DATA_DIR=./data DATABASE_URL='sqlite:///./data/rust-bench/pksp.db?mode=rwc' \
-MOCK_VISION=false REQUIRE_REAL_VISION=true CAM_IN_RTSP=rtsp://127.0.0.1:8554/demo \
+CAM_IN_RTSP=rtsp://127.0.0.1:8554/demo \
 CAM_IN_WEBRTC_PATH=demo ENABLE_SMART_SCENE=false MIN_FACE_PX=30 ./apps/edge/target/debug/pksp serve
 ```
 

@@ -1,6 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DETECTION_FRESHNESS_MS, useLiveWs } from "./useLiveWs";
+import { DETECTION_FRESHNESS_MS, LiveWsProvider, useLiveWs } from "./useLiveWs";
+
+const wrapper = ({ children }: { children: ReactNode }) =>
+  createElement(LiveWsProvider, null, children);
 
 type Handler = ((ev?: { data?: string }) => void) | null;
 
@@ -59,7 +63,7 @@ describe("useLiveWs", () => {
   });
 
   it("connects and tracks transport-only connected flag", async () => {
-    const { result } = renderHook(() => useLiveWs());
+    const { result } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });
@@ -71,7 +75,7 @@ describe("useLiveWs", () => {
   it("reconnects after close with capped exponential backoff", async () => {
     // Keep sockets from opening so backoff is not reset on onopen.
     FakeWebSocket.autoOpen = false;
-    renderHook(() => useLiveWs());
+    renderHook(() => useLiveWs(), { wrapper });
     expect(FakeWebSocket.instances).toHaveLength(1);
     await act(async () => {
       FakeWebSocket.instances[0].close();
@@ -107,7 +111,7 @@ describe("useLiveWs", () => {
   });
 
   it("unmount never schedules reconnect and leaves no live socket timer", async () => {
-    const { unmount } = renderHook(() => useLiveWs());
+    const { unmount } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });
@@ -125,7 +129,7 @@ describe("useLiveWs", () => {
 
   it("construction failure schedules reconnect only while mounted", async () => {
     FakeWebSocket.shouldThrowOnConstruct = true;
-    const { unmount } = renderHook(() => useLiveWs());
+    const { unmount } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });
@@ -145,7 +149,7 @@ describe("useLiveWs", () => {
   });
 
   it("preserves unknown camera status until camera_status arrives", async () => {
-    const { result } = renderHook(() => useLiveWs());
+    const { result } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });
@@ -161,7 +165,7 @@ describe("useLiveWs", () => {
   });
 
   it("clears detections on offline, close, and 500ms staleness", async () => {
-    const { result } = renderHook(() => useLiveWs());
+    const { result } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });
@@ -272,7 +276,7 @@ describe("useLiveWs", () => {
   });
 
   it("ignores malformed messages without crashing", async () => {
-    const { result } = renderHook(() => useLiveWs());
+    const { result } = renderHook(() => useLiveWs(), { wrapper });
     await act(async () => {
       await Promise.resolve();
     });

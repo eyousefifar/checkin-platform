@@ -1,12 +1,14 @@
 //! Enrollment boundary tests — limits, 404, cumulative upload, recompute integrity.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use pksp_api::{app, AppState};
 use pksp_db::{connect_pool, create_employee, list_employee_images, Settings};
 use pksp_media::MediaStatus;
-use pksp_vision::{Gallery, MockFaceEngine};
+use pksp_vision::Gallery;
 use serde_json::Value;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -47,15 +49,15 @@ fn test_settings(db: &TestDb) -> Settings {
     settings.jwt_secret = "test-jwt-secret-for-enrollment".into();
     settings.jwt_ttl_hours = 1;
     settings.cors_origins = vec!["http://localhost:3000".into()];
-    settings.mock_vision = true;
     settings.vision_enabled = false;
-    settings.require_real_vision = false;
     settings.camera_upsert = true;
     settings.cam_out_rtsp = String::new();
     settings.embedding_dim = 16;
     settings.min_enroll_images = 1;
     settings.min_face_px = 10;
     settings.min_det_score = 0.1;
+    settings.pose_max_yaw = 0.0;
+    settings.blur_min_var = 0.0;
     settings.max_enroll_files = 3;
     settings.max_enroll_file_bytes = 50_000;
     settings.max_enroll_upload_bytes = 200_000;
@@ -67,8 +69,7 @@ fn test_settings(db: &TestDb) -> Settings {
 async fn test_state(db: &TestDb) -> AppState {
     let settings = Arc::new(test_settings(db));
     let pool = connect_pool(&settings).await.expect("connect_pool");
-    let engine: Arc<dyn pksp_vision::FaceEngine> =
-        Arc::new(MockFaceEngine::new(settings.embedding_dim));
+    let engine = common::test_engine(settings.embedding_dim);
     let gallery = Arc::new(RwLock::new(Gallery::empty(
         settings.match_threshold,
         settings.match_margin,

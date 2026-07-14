@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { CameraSessionsProvider } from "@/hooks/useCameraSessions";
+import { HealthProvider, useHealth } from "@/hooks/useHealth";
+import { LiveWsProvider } from "@/hooks/useLiveWs";
 import { LicenseBanner } from "./LicenseBanner";
 import { MonoClock } from "./MonoClock";
 
@@ -20,7 +23,20 @@ function navClass(active: boolean) {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <HealthProvider>
+      <LiveWsProvider>
+        <CameraSessionsProvider>
+          <AppShellContent>{children}</AppShellContent>
+        </CameraSessionsProvider>
+      </LiveWsProvider>
+    </HealthProvider>
+  );
+}
+
+function AppShellContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { data: health } = useHealth();
 
   const links = NAV.map((item) => {
     const active =
@@ -54,9 +70,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex shrink-0 items-center gap-3 md:gap-4">
-          {/* Decorative millisecond clock — desktop/TV only */}
           <div className="hidden md:block" aria-hidden="true">
-            <MonoClock />
+            <MonoClock timezone={health?.timezone ?? null} />
           </div>
           <Link
             href="/login"

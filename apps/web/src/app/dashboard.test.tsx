@@ -15,6 +15,7 @@ const healthState = vi.hoisted(() => ({
     status: string;
     timezone: string;
     vision_ready: boolean;
+    vision_model: "buffalo_l";
     vision_provider: string;
     gallery_size: number;
     cameras: { id: string; name: string; direction: string; enabled: boolean; webrtc_path: string }[];
@@ -85,7 +86,8 @@ function healthWithPath(path: string) {
     status: "ok",
     timezone: "UTC",
     vision_ready: true,
-    vision_provider: "mock",
+    vision_model: "buffalo_l" as const,
+    vision_provider: "test",
     gallery_size: 0,
     cameras: [
       {

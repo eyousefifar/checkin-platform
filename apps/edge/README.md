@@ -1,6 +1,6 @@
 # PKSP Edge (Rust)
 
-On-prem check-in edge runtime: REST + WebSocket + mock/real vision + supervised media.
+On-prem check-in edge runtime: REST + WebSocket + buffalo_l ONNX vision + supervised media.
 
 ## Build
 
@@ -33,7 +33,8 @@ export DATABASE_URL="sqlite:///${DATA_DIR}/pksp-rust.db?mode=rwc"
 #   export DATABASE_URL="sqlite:///./data/rust-edge/pksp-rust.db"
 export ADMIN_PASSWORD=<set-a-strong-password>
 export JWT_SECRET=<generate-at-least-32-bytes>
-export MOCK_VISION=true
+export APP_TIMEZONE=Asia/Tehran
+export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
 export BIND_ADDR=127.0.0.1:8000
 export CAM_IN_WEBRTC_PATH=demo
 # optional: MEDIAMTX_BIN=mediamtx MEDIAMTX_CONFIG=../../configs/mediamtx.yml
@@ -87,24 +88,20 @@ Verify: `./apps/edge/scripts/smoke-media.sh` (generated test video).
 ## Vision pipeline
 
 ```
-capture (synthetic | ffmpeg RTSP)
+ffmpeg RTSP capture
   → quality → match → IoU track → vote
   → smart scene (zones + walk-by)
   → attendance FSM + cooldown
   → WS detections / attendance
 ```
 
-| Mode | How |
-|---|---|
-| Mock (default) | `MOCK_VISION=true` — synthetic frames + intensity embeddings |
-| Real ONNX | `MOCK_VISION=false`, models in `$DATA_DIR/models/buffalo_l/`, build with `--features pksp-vision/ort` |
-| Smart scene | `ENABLE_SMART_SCENE=true` (default), zones in `configs/zones.{camera_id}.json` |
+Models must exist in `$DATA_DIR/models/buffalo_l/`; normal builds always include ONNX Runtime. `ENABLE_SMART_SCENE=true` uses zones from `configs/zones.{camera_id}.json`.
 
 ```bash
 ./scripts/download_models.sh   # copies det_10g.onnx + w600k_r50.onnx into data/models/buffalo_l/
 ```
 
-**Re-enroll:** do not mix mock and real embeddings for production punches.
+**Re-enroll:** five usable real images are required before an employee is recognizable.
 
 ## Smart scene
 
@@ -134,9 +131,7 @@ Stop `pksp serve`, restore the prior Rust binary and SQLite backup, then restart
 
 ## Models / ONNX
 
-Default `MOCK_VISION=true` needs no weights.  
-For real buffalo_l, place ONNX under `$DATA_DIR/models/buffalo_l/` and set `MOCK_VISION=false`.  
-Re-enroll employees when changing model or embedding settings.
+Place buffalo_l ONNX files under `$DATA_DIR/models/buffalo_l/`. Startup fails if either model session cannot open. Re-enroll employees when changing model or embedding settings.
 
 ## Tests
 

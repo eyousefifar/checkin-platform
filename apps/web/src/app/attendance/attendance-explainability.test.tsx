@@ -7,6 +7,7 @@ const healthState = vi.hoisted(() => ({
     status: string;
     timezone: string;
     vision_ready: boolean;
+    vision_model: "buffalo_l";
     vision_provider: string;
     gallery_size: number;
     cameras: never[];
@@ -42,7 +43,8 @@ function healthPayload(timezone: string) {
     status: "ok",
     timezone,
     vision_ready: true,
-    vision_provider: "mock",
+    vision_model: "buffalo_l" as const,
+    vision_provider: "test",
     gallery_size: 0,
     cameras: [] as never[],
     media: {

@@ -50,4 +50,4 @@ unzip -q "$tmp/buffalo_l.zip" -d "$tmp"
 copy_if_present "$tmp/buffalo_l" || { echo "buffalo_l archive is missing required models" >&2; exit 1; }
 
 ls -la "$DEST"
-echo "Rust: cargo build -p pksp-cli --features pksp-vision/ort  (from apps/edge)"
+echo "Rust: cargo build -p pksp-cli  (from apps/edge; ONNX is always enabled)"

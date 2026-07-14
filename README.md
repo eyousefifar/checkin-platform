@@ -18,7 +18,7 @@ On-prem employee check-in using RTSP cameras and face recognition.
 | Layer | Choice |
 |---|---|
 | Edge API | Rust, Axum, Tokio, sqlx |
-| Vision | Rust + ONNX Runtime (or mock for theater) |
+| Vision | Rust + ONNX Runtime (`buffalo_l`) |
 | Match | Flat cosine |
 | Web | Next.js 16 + Tailwind (`DESIGN.md` BMW M) |
 | Video | MediaMTX (RTSP → WebRTC) |
@@ -43,6 +43,7 @@ DESIGN.md          BMW M tokens
 ### 1. Build the edge runtime
 
 ```bash
+./scripts/download_models.sh
 cd apps/edge
 cargo build --release
 ```
@@ -63,7 +64,8 @@ For an IP camera, set `CAM_IN_RTSP` and `CAM_IN_WEBRTC_PATH` in a private `.env`
 ```bash
 export DATA_DIR=./data
 export DATABASE_URL='sqlite:///./data/pksp-rust.db?mode=rwc'
-export MOCK_VISION=true
+export APP_TIMEZONE=Asia/Tehran
+export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
 export ADMIN_PASSWORD=<set-a-strong-password>
 export JWT_SECRET=<generate-at-least-32-bytes>
 ./apps/edge/target/release/pksp serve
@@ -71,7 +73,7 @@ export JWT_SECRET=<generate-at-least-32-bytes>
 
 Health: `curl http://localhost:8000/api/health`
 
-For real models, run `./scripts/download_models.sh`, build with `--features ort`, and set `MOCK_VISION=false`.
+The server fails closed if the buffalo_l models or an enabled camera RTSP URL are unavailable.
 
 ### 4. Run the web UI
 
@@ -105,7 +107,6 @@ npm run build
 - **CPU FPS** may drop below target on dual cameras; prefer one camera for a CEO demo.
 - **`buffalo_l` weights** are research/non-commercial unless licensed.
 - **PAD / anti-spoof** is not KYC-certified.
-- **Mock vision** proves the UX without models; use real ONNX for true faces.
 - Trusted LAN only — no public-internet hardening.
 
 ## Design docs

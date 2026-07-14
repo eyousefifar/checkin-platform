@@ -1,13 +1,12 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CameraSession } from "@/hooks/useCameraSessions";
 import type { FaceDet } from "@/lib/types";
-import type { WhepHandle } from "@/lib/whep";
 
-const connectWhep = vi.hoisted(() => vi.fn());
+let cameraSession: CameraSession | undefined;
 
-vi.mock("@/lib/whep", () => ({
-  whepUrl: (base: string, path: string) => `${base}/${path}/whep`,
-  connectWhep: (...args: unknown[]) => connectWhep(...args),
+vi.mock("@/hooks/useCameraSessions", () => ({
+  useCameraSession: () => cameraSession,
 }));
 
 vi.mock("./FaceHudCanvas", () => ({
@@ -27,60 +26,44 @@ function face(label = "A"): FaceDet {
   };
 }
 
-function mockHandle(overrides: Partial<RTCPeerConnection> = {}): WhepHandle {
-  const pc = {
-    connectionState: "connected",
-    onconnectionstatechange: null as ((this: RTCPeerConnection, ev: Event) => void) | null,
-    close: vi.fn(),
-    ...overrides,
-  } as unknown as RTCPeerConnection;
-  return {
-    pc,
-    close: vi.fn(() => {
-      pc.close();
-    }),
-  };
+function stream(stop = vi.fn()): MediaStream {
+  return { getTracks: () => [{ stop }] } as unknown as MediaStream;
 }
 
-describe("CameraTile WHEP lifecycle", () => {
+describe("CameraTile persistent stream attachment", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-    connectWhep.mockReset();
+    cameraSession = undefined;
     class RO {
       observe() {}
       unobserve() {}
       disconnect() {}
     }
     vi.stubGlobal("ResizeObserver", RO);
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  it("does not connect WHEP without a health-provided path", async () => {
+  it("waits for a health-provided path and session", () => {
     render(
-      <CameraTile
-        cameraId="cam_in"
-        name="Entrance"
-        direction="IN"
-        faces={[]}
-      />,
+      <CameraTile cameraId="cam_in" name="Entrance" direction="IN" faces={[]} />,
     );
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(connectWhep).not.toHaveBeenCalled();
     expect(screen.getByText(/Health retrying/i)).toBeTruthy();
     expect(screen.getByTestId("camera-capture-badge").textContent).toBe("UNKNOWN");
     expect(screen.getByTestId("browser-video-badge").textContent).toBe("CONNECTING");
   });
 
-  it("stays connecting after SDP success until playing event", async () => {
-    const handle = mockHandle();
-    connectWhep.mockResolvedValue(handle);
-
+  it("stays connecting after session success until the video playing event", async () => {
+    const existing = stream();
+    cameraSession = {
+      path: "demo",
+      stream: existing,
+      state: "connected",
+      error: null,
+    };
     render(
       <CameraTile
         cameraId="cam_in"
@@ -92,141 +75,114 @@ describe("CameraTile WHEP lifecycle", () => {
       />,
     );
 
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(connectWhep).toHaveBeenCalledTimes(1);
-    expect(connectWhep.mock.calls[0][0]).toMatch(/\/demo\/whep$/);
+    const video = screen.getByTestId("camera-video") as HTMLVideoElement;
+    expect(video.srcObject).toBe(existing);
     expect(screen.getByTestId("browser-video-badge").textContent).toBe("CONNECTING");
-    // Camera capture stays ONLINE from WS; video does not rewrite it.
-    expect(screen.getByTestId("camera-capture-badge").textContent).toBe("ONLINE");
-    expect(screen.getByTestId("camera-capture-badge").getAttribute("data-camera-status")).toBe(
-      "online",
-    );
-
-    const video = screen.getByTestId("camera-video");
-    await act(async () => {
-      fireEvent(video, new Event("playing"));
-    });
+    await act(async () => fireEvent(video, new Event("playing")));
     expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
     expect(screen.getByTestId("camera-capture-badge").textContent).toBe("ONLINE");
   });
 
-  it("retries on WHEP failure with one owned timer and keeps error visible", async () => {
-    connectWhep
-      .mockRejectedValueOnce(new Error("WHEP 503"))
-      .mockResolvedValueOnce(mockHandle());
-
-    render(
+  it("shows provider errors and recovers only after playing", async () => {
+    cameraSession = {
+      path: "demo",
+      stream: null,
+      state: "error",
+      error: "WHEP 503",
+    };
+    const { rerender } = render(
       <CameraTile
         cameraId="cam_in"
         name="Entrance"
         direction="IN"
         faces={[]}
-        webrtcPath="cam_in"
+        webrtcPath="demo"
       />,
     );
-
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    expect(connectWhep).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO ERROR");
-    expect(screen.getByTestId("video-status-text").textContent).toMatch(/WHEP 503/);
+    expect(screen.getByTestId("video-status-text").textContent).toContain("WHEP 503");
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(connectWhep).toHaveBeenCalledTimes(2);
-  });
-
-  it("leaves playing on stalled and recovers on next playing", async () => {
-    connectWhep.mockResolvedValue(mockHandle());
-    render(
-      <CameraTile
-        cameraId="cam_in"
-        name="Entrance"
-        direction="IN"
-        faces={[]}
-        webrtcPath="demo"
-      />,
-    );
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    const video = screen.getByTestId("camera-video");
-    await act(async () => {
-      fireEvent(video, new Event("playing"));
-    });
-    expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
-
-    await act(async () => {
-      fireEvent(video, new Event("stalled"));
-    });
-    expect(screen.getByTestId("browser-video-badge").textContent).toBe("CONNECTING");
-
-    await act(async () => {
-      fireEvent(video, new Event("playing"));
-    });
-    expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
-  });
-
-  it("closes handle and clears timers on path change and unmount", async () => {
-    const handle1 = mockHandle();
-    const handle2 = mockHandle();
-    connectWhep.mockResolvedValueOnce(handle1).mockResolvedValueOnce(handle2);
-
-    const { rerender, unmount } = render(
-      <CameraTile
-        cameraId="cam_in"
-        name="Entrance"
-        direction="IN"
-        faces={[]}
-        webrtcPath="demo"
-      />,
-    );
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(connectWhep).toHaveBeenCalledTimes(1);
-
+    cameraSession = {
+      path: "demo",
+      stream: stream(),
+      state: "connected",
+      error: null,
+    };
     rerender(
       <CameraTile
         cameraId="cam_in"
         name="Entrance"
         direction="IN"
         faces={[]}
-        webrtcPath="cam_in"
+        webrtcPath="demo"
       />,
     );
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(handle1.close).toHaveBeenCalled();
-    expect(connectWhep).toHaveBeenCalledTimes(2);
-    expect(connectWhep.mock.calls[1][0]).toMatch(/\/cam_in\/whep$/);
-
-    unmount();
-    expect(handle2.close).toHaveBeenCalled();
+    expect(screen.getByTestId("browser-video-badge").textContent).toBe("CONNECTING");
+    await act(async () =>
+      fireEvent(screen.getByTestId("camera-video"), new Event("playing")),
+    );
+    expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
   });
 
-  it("camera × video matrix never false-greens capture from video", async () => {
-    connectWhep.mockResolvedValue(mockHandle());
-    const cases: Array<{ online?: boolean; want: string }> = [
+  it("detaches on unmount without stopping provider-owned tracks", () => {
+    const stop = vi.fn();
+    cameraSession = {
+      path: "demo",
+      stream: stream(stop),
+      state: "connected",
+      error: null,
+    };
+    const { unmount } = render(
+      <CameraTile
+        cameraId="cam_in"
+        name="Entrance"
+        direction="IN"
+        faces={[]}
+        webrtcPath="demo"
+      />,
+    );
+    const video = screen.getByTestId("camera-video") as HTMLVideoElement;
+    unmount();
+    expect(video.srcObject).toBeNull();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("leaves playing on stalled and recovers on the next playing event", async () => {
+    cameraSession = {
+      path: "demo",
+      stream: stream(),
+      state: "connected",
+      error: null,
+    };
+    render(
+      <CameraTile
+        cameraId="cam_in"
+        name="Entrance"
+        direction="IN"
+        faces={[]}
+        webrtcPath="demo"
+      />,
+    );
+    const video = screen.getByTestId("camera-video");
+    await act(async () => fireEvent(video, new Event("playing")));
+    fireEvent(video, new Event("stalled"));
+    expect(screen.getByTestId("browser-video-badge").textContent).toBe("CONNECTING");
+    fireEvent(video, new Event("playing"));
+    expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
+  });
+
+  it("never derives camera capture status from browser playback", async () => {
+    cameraSession = {
+      path: "demo",
+      stream: stream(),
+      state: "connected",
+      error: null,
+    };
+    for (const test of [
       { online: undefined, want: "UNKNOWN" },
       { online: false, want: "OFFLINE" },
       { online: true, want: "ONLINE" },
-    ];
-    for (const c of cases) {
+    ]) {
       const { unmount } = render(
         <CameraTile
           cameraId="cam_in"
@@ -234,34 +190,14 @@ describe("CameraTile WHEP lifecycle", () => {
           direction="IN"
           faces={[]}
           webrtcPath="demo"
-          online={c.online}
+          online={test.online}
         />,
       );
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      const video = screen.getByTestId("camera-video");
-      await act(async () => {
-        fireEvent(video, new Event("playing"));
-      });
-      expect(screen.getByTestId("browser-video-badge").textContent).toBe("VIDEO LIVE");
-      expect(screen.getByTestId("camera-capture-badge").textContent).toBe(c.want);
+      await act(async () =>
+        fireEvent(screen.getByTestId("camera-video"), new Event("playing")),
+      );
+      expect(screen.getByTestId("camera-capture-badge").textContent).toBe(test.want);
       unmount();
     }
-  });
-
-  it("contains no HLS fallback path", () => {
-    // Static guarantee also covered by source grep in plan verify step.
-    render(
-      <CameraTile
-        cameraId="cam_in"
-        name="Entrance"
-        direction="IN"
-        faces={[]}
-        webrtcPath="demo"
-      />,
-    );
-    expect(screen.queryByText(/HLS/i)).toBeNull();
   });
 });

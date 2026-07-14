@@ -1,6 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { API_URL } from "@/lib/api";
 import type { HealthResponse } from "@/lib/types";
 
@@ -14,12 +23,12 @@ export type UseHealthResult = {
   refresh: () => void;
 };
 
+const HealthContext = createContext<UseHealthResult | null>(null);
+
 /**
- * Shared public `/api/health` fetch for timezone, cameras, and media status.
- * Native fetch only — no SWR/React Query/context. Retries with a capped
- * interval; replaces data atomically on success; cancels on unmount.
+ * Public `/api/health` owner. Mounted once by HealthProvider.
  */
-export function useHealth(): UseHealthResult {
+function useHealthState(): UseHealthResult {
   const [data, setData] = useState<HealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -105,4 +114,15 @@ export function useHealth(): UseHealthResult {
   }, [fetchOnce]);
 
   return { data, loading, error, refresh };
+}
+
+export function HealthProvider({ children }: { children: ReactNode }) {
+  const value = useHealthState();
+  return createElement(HealthContext.Provider, { value }, children);
+}
+
+export function useHealth(): UseHealthResult {
+  const value = useContext(HealthContext);
+  if (!value) throw new Error("useHealth must be used inside HealthProvider");
+  return value;
 }

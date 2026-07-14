@@ -11,15 +11,13 @@ use axum::routing::{get, post};
 use axum::Router;
 use pksp_db::{connect_pool, list_cameras, Settings};
 use pksp_media::MediaSupervisor;
-use pksp_vision::{
-    reload_gallery, start_vision_worker, FaceEngine, Gallery, MockFaceEngine, OrtFaceEngine,
-};
+use pksp_vision::{reload_gallery, start_vision_worker, FaceEngine, Gallery, OrtFaceEngine};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::info;
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     // Fail closed on APP_TIMEZONE before DB, models, media, or listener.
@@ -31,36 +29,48 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
         .validate_startup()
         .map_err(|e| anyhow::anyhow!(e))?;
     let settings = Arc::new(settings);
-    let pool = connect_pool(&settings).await?;
+    let model_dir = settings.model_dir();
+    let ort = OrtFaceEngine::try_load_with(&model_dir, settings.det_size, &settings.onnx_providers);
+    if !ort.ready() {
+        anyhow::bail!(
+            "buffalo_l ONNX models or sessions unavailable under {}",
+            model_dir.display()
+        );
+    }
+    info!(
+        provider = ort.execution_provider(),
+        "ONNX buffalo_l engine ready"
+    );
+    let engine: Arc<dyn FaceEngine> = Arc::new(ort);
 
-    let engine: Arc<dyn FaceEngine> = if settings.mock_vision {
-        Arc::new(MockFaceEngine::new(settings.embedding_dim))
-    } else {
-        let model_dir = settings.model_dir();
-        let ort =
-            OrtFaceEngine::try_load_with(&model_dir, settings.det_size, &settings.onnx_providers);
-        if ort.ready() {
-            info!(
-                provider = ort.execution_provider(),
-                "ONNX buffalo_l engine ready"
-            );
-            Arc::new(ort)
-        } else if settings.require_real_vision {
-            anyhow::bail!(
-                "REQUIRE_REAL_VISION=true but ONNX not ready under {}",
-                model_dir.display()
-            );
-        } else {
-            warn!("ONNX models not ready; falling back to mock engine");
-            Arc::new(MockFaceEngine::new(settings.embedding_dim))
-        }
-    };
+    let pool = connect_pool(&settings).await?;
 
     let gallery = Arc::new(RwLock::new(Gallery::empty(
         settings.match_threshold,
         settings.match_margin,
     )));
     reload_gallery(&pool, &gallery, &settings).await?;
+
+    let cams = list_cameras(&pool, true).await?;
+    let cam_ids: Vec<String> = if cams.is_empty() {
+        vec!["cam_in".into()]
+    } else {
+        cams.iter().map(|c| c.id.clone()).collect()
+    };
+    let mut camera_rtsps: HashMap<String, String> = cams
+        .iter()
+        .map(|c| (c.id.clone(), c.rtsp_url.clone()))
+        .collect();
+    if cams.is_empty() {
+        camera_rtsps.insert("cam_in".into(), settings.cam_in_rtsp.clone());
+    }
+    if let Some(camera_id) = cam_ids.iter().find(|camera_id| {
+        camera_rtsps
+            .get(*camera_id)
+            .is_none_or(|url| url.trim().is_empty())
+    }) {
+        anyhow::bail!("enabled camera {camera_id} has no RTSP URL");
+    }
 
     let (tx, _) = broadcast::channel::<serde_json::Value>(256);
 
@@ -87,18 +97,6 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     media.start();
     let media_status = media.status_handle();
 
-    let cams = list_cameras(&pool, true).await?;
-    let cam_ids: Vec<String> = cams.iter().map(|c| c.id.clone()).collect();
-    let mut camera_rtsps: HashMap<String, String> = HashMap::new();
-    for c in &cams {
-        if !c.rtsp_url.is_empty() {
-            camera_rtsps.insert(c.id.clone(), c.rtsp_url.clone());
-        }
-    }
-    if camera_rtsps.is_empty() && !settings.cam_in_rtsp.is_empty() {
-        camera_rtsps.insert("cam_in".into(), settings.cam_in_rtsp.clone());
-    }
-
     let vision = if settings.vision_enabled {
         Some(start_vision_worker(
             pool.clone(),
@@ -106,13 +104,9 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
             engine.clone(),
             gallery.clone(),
             tx.clone(),
-            if cam_ids.is_empty() {
-                vec!["cam_in".into()]
-            } else {
-                cam_ids
-            },
+            cam_ids,
             camera_rtsps,
-        ))
+        )?)
     } else {
         None
     };

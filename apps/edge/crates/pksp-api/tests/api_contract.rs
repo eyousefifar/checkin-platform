@@ -1,11 +1,13 @@
 //! In-process API contract tests — no listener, media workers, or vision processes.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use pksp_api::{app, AppState};
 use pksp_db::{connect_pool, Settings};
 use pksp_media::MediaStatus;
-use pksp_vision::{Gallery, MockFaceEngine};
+use pksp_vision::Gallery;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -46,9 +48,7 @@ fn test_settings(db: &TestDb) -> Settings {
     settings.jwt_secret = "test-jwt-secret-for-api-contract".into();
     settings.jwt_ttl_hours = 1;
     settings.cors_origins = vec!["http://localhost:3000".into()];
-    settings.mock_vision = true;
     settings.vision_enabled = false;
-    settings.require_real_vision = false;
     settings.camera_upsert = true;
     settings.cam_out_rtsp = String::new();
     settings
@@ -57,8 +57,7 @@ fn test_settings(db: &TestDb) -> Settings {
 async fn test_state(db: &TestDb) -> AppState {
     let settings = Arc::new(test_settings(db));
     let pool = connect_pool(&settings).await.expect("connect_pool");
-    let engine: Arc<dyn pksp_vision::FaceEngine> =
-        Arc::new(MockFaceEngine::new(settings.embedding_dim));
+    let engine = common::test_engine(settings.embedding_dim);
     let gallery = Arc::new(RwLock::new(Gallery::empty(
         settings.match_threshold,
         settings.match_margin,
@@ -105,9 +104,10 @@ async fn health_returns_200_with_status_cameras_media() {
     assert!(body.get("media").is_some(), "missing media");
     assert!(body["cameras"].is_array());
     assert!(body["media"].is_object());
-    // Timezone is the only settings surface on health (validated APP_TIMEZONE).
+    // Validated timezone and fixed operational model identity are public.
     assert!(body["timezone"].is_string());
     assert!(!body["timezone"].as_str().unwrap().is_empty());
+    assert_eq!(body["vision_model"], "buffalo_l");
     // Distinguish process/configuration from a ready publisher.
     assert_eq!(body["media"]["publication"], "unavailable");
     assert!(body["media"]["preferred_webrtc_path"].is_null());

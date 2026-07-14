@@ -1,12 +1,17 @@
 import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useHealth } from "./useHealth";
+import { HealthProvider, useHealth } from "./useHealth";
+
+const wrapper = ({ children }: { children: ReactNode }) =>
+  createElement(HealthProvider, null, children);
 
 const okBody = {
   status: "ok",
   timezone: "Asia/Tehran",
   vision_ready: true,
-  vision_provider: "mock",
+  vision_model: "buffalo_l",
+  vision_provider: "test",
   gallery_size: 0,
   cameras: [],
   media: {
@@ -40,7 +45,7 @@ describe("useHealth", () => {
       });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { result } = renderHook(() => useHealth());
+    const { result } = renderHook(() => useHealth(), { wrapper });
     expect(result.current.loading).toBe(true);
     expect(result.current.data).toBeNull();
 
@@ -77,7 +82,7 @@ describe("useHealth", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const { unmount } = renderHook(() => useHealth());
+    const { unmount } = renderHook(() => useHealth(), { wrapper });
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     unmount();

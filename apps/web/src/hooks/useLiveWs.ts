@@ -1,6 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { wsUrl } from "@/lib/api";
 import type { AttendanceMsg, DetectionsMsg, FaceDet, MetricsMsg } from "@/lib/types";
 
@@ -9,7 +18,10 @@ export const DETECTION_FRESHNESS_MS = 500;
 
 export type CameraOnlineMap = Record<string, boolean | undefined>;
 
-export function useLiveWs() {
+export type LiveWsState = ReturnType<typeof useLiveWsState>;
+const LiveWsContext = createContext<LiveWsState | null>(null);
+
+function useLiveWsState() {
   const [connected, setConnected] = useState(false);
   const [detections, setDetections] = useState<Record<string, FaceDet[]>>({});
   const [events, setEvents] = useState<AttendanceMsg[]>([]);
@@ -160,4 +172,15 @@ export function useLiveWs() {
   }, [connect]);
 
   return { connected, detections, events, metrics, cameraOnline };
+}
+
+export function LiveWsProvider({ children }: { children: ReactNode }) {
+  const value = useLiveWsState();
+  return createElement(LiveWsContext.Provider, { value }, children);
+}
+
+export function useLiveWs(): LiveWsState {
+  const value = useContext(LiveWsContext);
+  if (!value) throw new Error("useLiveWs must be used inside LiveWsProvider");
+  return value;
 }

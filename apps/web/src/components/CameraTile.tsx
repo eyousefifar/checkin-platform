@@ -2,13 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FaceHudCanvas } from "./FaceHudCanvas";
-import { connectWhep, whepUrl, type WhepHandle } from "@/lib/whep";
+import { useCameraSession } from "@/hooks/useCameraSessions";
 import type { FaceDet } from "@/lib/types";
 
 type VideoLifecycle = "connecting" | "playing" | "error";
-
-const INITIAL_RETRY_MS = 2000;
-const MAX_RETRY_MS = 10000;
 
 export function CameraTile({
   cameraId,
@@ -34,6 +31,7 @@ export function CameraTile({
   const [size, setSize] = useState({ w: 640, h: 360 });
   const [videoState, setVideoState] = useState<VideoLifecycle>("connecting");
   const [videoError, setVideoError] = useState<string | null>(null);
+  const session = useCameraSession(cameraId);
   const webrtcBase =
     process.env.NEXT_PUBLIC_WEBRTC_BASE || "http://localhost:8889";
 
@@ -48,131 +46,63 @@ export function CameraTile({
     return () => ro.disconnect();
   }, []);
 
-  // Single WHEP playback lifecycle: connecting → playing | error (with retry).
-  // SDP success is not "playing"; only the video `playing` event is.
+  // Attach the provider-owned stream. This component never owns or stops tracks.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-
-    // Do not assume a path while health has not resolved webrtcPath.
-    if (!webrtcPath) {
+    if (!webrtcPath || !session?.stream) {
+      video.srcObject = null;
       setVideoState("connecting");
       setVideoError(null);
       return;
     }
 
-    let handle: WhepHandle | null = null;
-    let cancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let retryAttempt = 0;
-
-    const endpoint = whepUrl(webrtcBase, webrtcPath);
-
-    const clearRetry = () => {
-      if (retryTimer != null) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-    };
-
-    const closeHandle = () => {
-      if (handle) {
-        handle.close();
-        handle = null;
-      }
-      if (video.srcObject) {
-        video.srcObject = null;
-      }
-    };
-
-    const scheduleRetry = (reason: string) => {
-      if (cancelled) return;
-      setVideoState("error");
-      setVideoError(reason);
-      clearRetry();
-      const delay = Math.min(MAX_RETRY_MS, INITIAL_RETRY_MS * 2 ** retryAttempt);
-      retryAttempt += 1;
-      retryTimer = setTimeout(() => {
-        if (!cancelled) void start();
-      }, delay);
-    };
-
     const onPlaying = () => {
-      if (cancelled) return;
-      retryAttempt = 0;
       setVideoState("playing");
       setVideoError(null);
     };
 
     const onWaitingOrStalled = () => {
-      if (cancelled) return;
-      // Leave playing and surface reconnect intent without treating as terminal.
       setVideoState((prev) => (prev === "playing" ? "connecting" : prev));
     };
 
     const onVideoError = () => {
-      if (cancelled) return;
-      scheduleRetry("Video element error — retrying WHEP");
-    };
-
-    const onTrackEnded = () => {
-      if (cancelled) return;
-      scheduleRetry("Media track ended — retrying WHEP");
+      setVideoState("error");
+      setVideoError("Video playback error");
     };
 
     video.addEventListener("playing", onPlaying);
     video.addEventListener("waiting", onWaitingOrStalled);
     video.addEventListener("stalled", onWaitingOrStalled);
     video.addEventListener("error", onVideoError);
-    video.addEventListener("wheptrackended", onTrackEnded);
-
-    const start = async () => {
-      if (cancelled) return;
-      clearRetry();
-      closeHandle();
-      setVideoState("connecting");
-      setVideoError(null);
-      try {
-        handle = await connectWhep(endpoint, video);
-        if (cancelled) {
-          handle.close();
-          handle = null;
-          return;
-        }
-
-        // Connection failure after SDP success.
-        handle.pc.onconnectionstatechange = () => {
-          if (cancelled || !handle) return;
-          const st = handle.pc.connectionState;
-          if (st === "failed" || st === "disconnected" || st === "closed") {
-            scheduleRetry(`WebRTC ${st} — retrying WHEP`);
-          }
-        };
-        // Stay in connecting until `playing` fires — SDP alone is not live.
-      } catch (err) {
-        if (cancelled) return;
-        const raw = err instanceof Error ? err.message : "WHEP failed";
-        const display =
-          raw.toLowerCase().includes("network") || raw.includes("fetch")
-            ? `MediaMTX unreachable at ${webrtcBase} (docker compose up -d mediamtx?)`
-            : raw;
-        scheduleRetry(display);
-      }
-    };
-
-    void start();
+    video.srcObject = session.stream;
+    setVideoState("connecting");
+    setVideoError(null);
+    void video.play().catch(() => {
+      /* autoplay policy: remain connecting until the playing event */
+    });
 
     return () => {
-      cancelled = true;
-      clearRetry();
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("waiting", onWaitingOrStalled);
       video.removeEventListener("stalled", onWaitingOrStalled);
       video.removeEventListener("error", onVideoError);
-      video.removeEventListener("wheptrackended", onTrackEnded);
-      closeHandle();
+      video.srcObject = null;
     };
-  }, [webrtcBase, webrtcPath]);
+  }, [session?.stream, webrtcPath]);
+
+  useEffect(() => {
+    if (!webrtcPath || !session || session.state === "connecting") {
+      setVideoState((previous) =>
+        previous === "playing" ? "connecting" : previous,
+      );
+      return;
+    }
+    if (session.state === "error") {
+      setVideoState("error");
+      setVideoError(session.error);
+    }
+  }, [session, webrtcPath]);
 
   const showVideo = videoState === "playing";
   const cameraLabel =
