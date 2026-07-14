@@ -48,24 +48,42 @@ cd apps/edge
 cargo build --release
 ```
 
-### 2. Start MediaMTX and an optional demo stream
+### 2. Full local demo (recommended)
+
+One command starts MediaMTX (via `pksp`), a mock RTSP camera, and the Next UI.
+Vision and the browser both use path **`cam_in`** so HUD boxes sit on the video you see.
 
 ```bash
-cd ../..
-docker compose up -d mediamtx
 chmod +x scripts/*.sh
-./scripts/demo_rtsp.sh # needs ffmpeg; or SAMPLE=/path/to/lobby.mp4 ./scripts/demo_rtsp.sh
+./scripts/dev-stack.sh start webcam      # best: your face via Mac camera
+# ./scripts/dev-stack.sh start chokepoint # offline face crops (detection only)
+# ./scripts/dev-stack.sh start testsrc    # color bars, no faces
+# SAMPLE=/path/to/lobby.mp4 ./scripts/dev-stack.sh start sample
+./scripts/dev-stack.sh status
+./scripts/dev-stack.sh stop
 ```
 
-For an IP camera, set `CAM_IN_RTSP` and `CAM_IN_WEBRTC_PATH` in a private `.env`; never commit camera credentials.
+Open **http://localhost:3000** (login password defaults to `change-me` for loopback).
+Enroll under **Configure** (guided capture), then show the same face to the mock RTSP source to test recognition.
 
-### 3. Run the Rust API
+Manual pieces (if you prefer separate terminals):
+
+```bash
+# Mock RTSP only (MediaMTX must already be up):
+SOURCE=webcam ./scripts/demo_rtsp.sh
+# SOURCE=chokepoint|testsrc|sample  SAMPLE=/path/to.mp4
+```
+
+For a real IP camera, set `CAM_IN_RTSP` and `CAM_IN_WEBRTC_PATH` to the **same** MediaMTX path in a private `.env`; never commit camera credentials.
+
+### 3. Run the Rust API alone
 
 ```bash
 export DATA_DIR=./data
 export DATABASE_URL='sqlite:///./data/pksp-rust.db?mode=rwc'
 export APP_TIMEZONE=Asia/Tehran
 export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
+export CAM_IN_WEBRTC_PATH=cam_in
 export ADMIN_PASSWORD=<set-a-strong-password>
 export JWT_SECRET=<generate-at-least-32-bytes>
 ./apps/edge/target/release/pksp serve
@@ -75,7 +93,7 @@ Health: `curl http://localhost:8000/api/health`
 
 The server fails closed if the buffalo_l models or an enabled camera RTSP URL are unavailable.
 
-### 4. Run the web UI
+### 4. Run the web UI alone
 
 ```bash
 cd apps/web
