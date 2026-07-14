@@ -963,6 +963,108 @@ pub async fn commit_identity(
     })
 }
 
+/// Snapshot metadata stored for an attendance event (paths relative to DATA_DIR).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventSnapshotMeta {
+    pub event_id: i64,
+    /// Relative path under DATA_DIR, e.g. `events/42.jpg`.
+    pub snapshot_path: Option<String>,
+    /// Normalized xyxy bbox as JSON array string, e.g. `[0.1,0.2,0.3,0.4]`.
+    pub snapshot_bbox_json: Option<String>,
+}
+
+/// Events directory under DATA_DIR.
+pub fn events_dir(settings: &Settings) -> PathBuf {
+    settings.data_dir.join("events")
+}
+
+/// Relative snapshot path for an event id (`events/<id>.jpg`).
+pub fn event_snapshot_rel_path(event_id: i64) -> String {
+    format!("events/{event_id}.jpg")
+}
+
+/// Validate that a relative snapshot path is owned by the events directory
+/// under DATA_DIR and resolves inside it (no path traversal).
+pub fn resolve_event_snapshot_path(settings: &Settings, relative: &str) -> Result<PathBuf, String> {
+    let rel = relative.trim();
+    if rel.is_empty() {
+        return Err("empty snapshot path".into());
+    }
+    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') {
+        return Err("invalid snapshot path".into());
+    }
+    if !rel.starts_with("events/") {
+        return Err("snapshot path must be under events/".into());
+    }
+    // Reject nested or unexpected extensions beyond events/<name>.jpg
+    let rest = &rel["events/".len()..];
+    if rest.is_empty() || rest.contains('/') || rest.contains('\\') {
+        return Err("invalid snapshot path".into());
+    }
+    if !rest.ends_with(".jpg") && !rest.ends_with(".jpeg") {
+        return Err("snapshot path must be jpeg".into());
+    }
+    let abs = settings.data_dir.join(rel);
+    let events_root = events_dir(settings);
+    // Existing files must also remain inside the canonical events directory;
+    // lexical containment alone does not catch a symlinked snapshot.
+    let abs_norm = abs.canonicalize().unwrap_or_else(|_| abs.clone());
+    let root_norm = events_root
+        .canonicalize()
+        .unwrap_or_else(|_| events_root.clone());
+    if abs.exists() && !abs_norm.starts_with(&root_norm) {
+        return Err("snapshot path escapes events directory".into());
+    }
+    Ok(abs)
+}
+
+/// Attach snapshot metadata after a successful attendance commit.
+/// Does not accept absolute or caller-controlled escape paths.
+pub async fn attach_event_snapshot(
+    pool: &SqlitePool,
+    event_id: i64,
+    relative_path: &str,
+    bbox_xyxy: [f32; 4],
+) -> Result<()> {
+    if relative_path.contains("..")
+        || relative_path.starts_with('/')
+        || !relative_path.starts_with("events/")
+    {
+        anyhow::bail!("refusing non-events relative snapshot path");
+    }
+    let bbox_json = serde_json::to_string(&bbox_xyxy)?;
+    let res = sqlx::query(
+        "UPDATE attendance_events SET snapshot_path = ?, snapshot_bbox_json = ? WHERE id = ?",
+    )
+    .bind(relative_path)
+    .bind(&bbox_json)
+    .bind(event_id)
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        anyhow::bail!("event {event_id} not found for snapshot attach");
+    }
+    Ok(())
+}
+
+/// Fetch snapshot metadata for an event. `None` if the event does not exist.
+pub async fn get_event_snapshot(
+    pool: &SqlitePool,
+    event_id: i64,
+) -> Result<Option<EventSnapshotMeta>> {
+    let row = sqlx::query(
+        "SELECT id, snapshot_path, snapshot_bbox_json FROM attendance_events WHERE id = ?",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| EventSnapshotMeta {
+        event_id: r.get("id"),
+        snapshot_path: r.get("snapshot_path"),
+        snapshot_bbox_json: r.get("snapshot_bbox_json"),
+    }))
+}
+
 /// Local calendar date (`YYYY-MM-DD`) for `now` in the named IANA timezone.
 ///
 /// A valid IANA name returns its local calendar date. An invalid name returns an

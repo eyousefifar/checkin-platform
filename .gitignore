@@ -19,6 +19,9 @@ apps/web/.env.local
 .vscode/
 *.swp
 
+# Agent plan scratch (not product code)
+.hermes/
+
 # models / samples
 models/
 samples/*.mp4

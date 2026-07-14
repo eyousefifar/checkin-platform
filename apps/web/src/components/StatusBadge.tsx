@@ -1,8 +1,8 @@
 const STYLES: Record<string, string> = {
-  present: "border-success/40 text-success",
+  present: "border-signal/40 text-signal",
   incomplete: "border-warning/40 text-warning",
   absent: "border-hairline text-muted",
-  anomaly: "border-m-red/40 text-m-red",
+  anomaly: "border-danger/40 text-danger",
 };
 
 export function StatusBadge({ status }: { status: string }) {

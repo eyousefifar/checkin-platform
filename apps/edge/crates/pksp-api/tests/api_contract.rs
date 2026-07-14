@@ -246,3 +246,207 @@ async fn router_construction_starts_no_listener_worker_or_child() {
         "health must not start media processes"
     );
 }
+
+// ── Event snapshots ──────────────────────────────────────────────────────────
+
+use axum::http::header;
+use image::{ImageBuffer, ImageFormat, Rgb};
+use pksp_db::{
+    attach_event_snapshot, commit_identity, create_employee, event_snapshot_rel_path,
+    get_event_snapshot, resolve_event_snapshot_path, CommitOutcome,
+};
+use std::io::Cursor;
+
+fn solid_jpeg(w: u32, h: u32, v: u8) -> Vec<u8> {
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |_, _| Rgb([v, v, v]));
+    let mut buf = Vec::new();
+    img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
+        .unwrap();
+    buf
+}
+
+async fn login_token(router: &axum::Router, password: &str) -> String {
+    let res = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(r#"{{"password":"{password}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    v["access_token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn event_snapshot_404_when_missing() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let router = app(state);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/attendance/events/99999/snapshot")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn event_snapshot_serves_jpeg_no_store() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let pool = state.pool.clone();
+    let settings = state.settings.clone();
+    let password = state.settings.admin_password.clone();
+
+    let eid = create_employee(&pool, "SNAP1", "Snap User", None)
+        .await
+        .unwrap();
+    let outcome = commit_identity(&pool, eid, "cam_in", 0.95, Some(1), 0.0, 0.0, "UTC")
+        .await
+        .unwrap();
+    let CommitOutcome::Committed { event_id, .. } = outcome else {
+        panic!("expected commit");
+    };
+
+    let rel = event_snapshot_rel_path(event_id);
+    let events = settings.data_dir.join("events");
+    std::fs::create_dir_all(&events).unwrap();
+    let jpeg = solid_jpeg(32, 32, 180);
+    std::fs::write(settings.data_dir.join(&rel), &jpeg).unwrap();
+    attach_event_snapshot(&pool, event_id, &rel, [0.1, 0.2, 0.5, 0.6])
+        .await
+        .unwrap();
+
+    let router = app(state);
+    let res = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/attendance/events/{event_id}/snapshot"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    assert_eq!(
+        res.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), jpeg.as_slice());
+
+    // History includes additive snapshot fields
+    let token = login_token(&router, &password).await;
+    let res = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/attendance/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    let arr = v.as_array().unwrap();
+    let row = arr.iter().find(|r| r["id"] == event_id).expect("row");
+    assert_eq!(
+        row["snapshot_url"],
+        format!("/api/attendance/events/{event_id}/snapshot")
+    );
+    assert_eq!(row["bbox"][0], 0.1);
+    assert_eq!(row["bbox"][3], 0.6);
+}
+
+#[tokio::test]
+async fn event_history_null_snapshot_when_absent() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let pool = state.pool.clone();
+    let password = state.settings.admin_password.clone();
+    let eid = create_employee(&pool, "SNAP2", "No Snap", None)
+        .await
+        .unwrap();
+    let outcome = commit_identity(&pool, eid, "cam_in", 0.9, None, 0.0, 0.0, "UTC")
+        .await
+        .unwrap();
+    let CommitOutcome::Committed { event_id, .. } = outcome else {
+        panic!("expected commit");
+    };
+    let meta = get_event_snapshot(&pool, event_id).await.unwrap().unwrap();
+    assert!(meta.snapshot_path.is_none());
+
+    let router = app(state);
+    let token = login_token(&router, &password).await;
+    let res = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/attendance/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v = body_json(res).await;
+    let row = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == event_id)
+        .unwrap();
+    assert!(row["snapshot_url"].is_null());
+    assert!(row["bbox"].is_null());
+}
+
+#[test]
+fn resolve_snapshot_path_rejects_traversal() {
+    let db = temp_db();
+    let settings = test_settings(&db);
+    assert!(resolve_event_snapshot_path(&settings, "../etc/passwd").is_err());
+    assert!(resolve_event_snapshot_path(&settings, "enroll/1/x.jpg").is_err());
+    assert!(resolve_event_snapshot_path(&settings, "/absolute/x.jpg").is_err());
+    let ok = resolve_event_snapshot_path(&settings, "events/42.jpg").unwrap();
+    assert!(ok.ends_with("events/42.jpg"));
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_snapshot_path_rejects_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let db = temp_db();
+    let settings = test_settings(&db);
+    let events = settings.data_dir.join("events");
+    std::fs::create_dir_all(&events).unwrap();
+    let outside = settings.data_dir.join("outside.jpg");
+    std::fs::write(&outside, b"not an event snapshot").unwrap();
+    symlink(&outside, events.join("42.jpg")).unwrap();
+
+    assert!(resolve_event_snapshot_path(&settings, "events/42.jpg").is_err());
+}

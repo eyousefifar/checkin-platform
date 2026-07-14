@@ -48,7 +48,7 @@ and known limitations documented rather than hidden.
 | 2 | The selected `advisor-plans/NNN-*.md` | Steps, drift check, STOP, done criteria |
 | 3 | This file (`GOAL-ADVISOR.md`) | Cross-plan order, Python retirement, whole-goal DoD |
 | 4 | `apps/edge/README.md` + `apps/edge/docs/deploy.md` | How the active runtime is run |
-| 5 | `DESIGN.md` | BMW M UI language (do not invent a new design system) |
+| 5 | `DESIGN.md` | Aerospace ops UI language (do not invent a new design system) |
 | 6 | `rust-port-plans/05` (contracts) + `apps/web/src/lib/types.ts` | Frozen HTTP/WS field names |
 | 7 | Historical only | `apps/api/**`, `GOAL.md`, `GOAL-RUST.md`, `plans/*` — **behavior reference**, not the active runtime |
 
@@ -97,7 +97,7 @@ pksp serve                    # apps/edge Rust binary — sole control + vision 
 └── enrollment cumulative & recoverable
          │
          ▼ same contracts
-apps/web (Next.js)            # BMW M admin UI — camera wall, enroll, attendance
+apps/web (Next.js)            # Aerospace ops admin UI — camera wall, enroll, attendance
 configs/ + apps/edge/configs  # MediaMTX pins
 data/                         # SQLite + enroll (restricted perms)
 scripts/                      # shell only: demo RTSP, download models, benches
@@ -116,7 +116,7 @@ scripts/                      # shell only: demo RTSP, download models, benches
 - `apps/edge/**` Rust workspace
 - `apps/web/**` Next.js
 - MediaMTX (pinned; upgraded only via plan 019)
-- SQLite, flat cosine match, BMW M design
+- SQLite, flat cosine match, aerospace ops design
 
 ---
 
@@ -126,7 +126,7 @@ scripts/                      # shell only: demo RTSP, download models, benches
 |---|---|
 | Product | On-prem LAN check-in; CEO demo grade, not certified payroll |
 | Runtime | **Rust only** after Wave 8 |
-| UI | Next.js 16 + React 19 + Tailwind 3 + BMW M |
+| UI | Next.js 16 + React 19 + Tailwind 3 + aerospace ops (`DESIGN.md`) |
 | Match | Cosine on L2 512-d embeddings — not FAISS |
 | DB | SQLite; embeddings float32 LE, 2048-byte blobs |
 | Models | buffalo_l ONNX via `ort` (+ mock); non-commercial banner remains |

@@ -9,9 +9,9 @@ On-prem employee check-in using RTSP cameras and face recognition.
 
 ## What it is
 
-1. **Live dashboard** — camera tiles + WebSocket face HUD (BMW M sci-fi shell)
-2. **Employee enrollment** — multi-photo gallery → mean L2 embedding
-3. **Daily attendance** — check-in / check-out FSM + CSV export
+1. **Live dashboard** — camera wall + WebSocket face HUD (aerospace ops shell)
+2. **Employee enrollment** — model-guided webcam capture (or manual upload) → mean L2 embedding
+3. **Daily attendance** — check-in / check-out FSM, event snapshots, CSV export
 
 ## Stack
 
@@ -20,7 +20,7 @@ On-prem employee check-in using RTSP cameras and face recognition.
 | Edge API | Rust, Axum, Tokio, sqlx |
 | Vision | Rust + ONNX Runtime (`buffalo_l`) |
 | Match | Flat cosine |
-| Web | Next.js 16 + Tailwind (`DESIGN.md` BMW M) |
+| Web | Next.js 16 + Tailwind (`DESIGN.md` aerospace ops) |
 | Video | MediaMTX (RTSP → WebRTC) |
 | DB | SQLite |
 
@@ -32,10 +32,10 @@ On-prem employee check-in using RTSP cameras and face recognition.
 apps/edge/         Rust edge runtime
 apps/web/          Next.js admin UI
 configs/           MediaMTX and zone configuration
-data/              SQLite + enroll images (gitignored)
+data/              SQLite + enroll + event snapshots (gitignored)
 scripts/           demo RTSP and model download helpers
 plans/             archived design specs
-DESIGN.md          BMW M tokens
+DESIGN.md          aerospace ops design system
 ```
 
 ## Quickstart (Mac, LAN)
@@ -108,12 +108,14 @@ npm run build
 - **`buffalo_l` weights** are research/non-commercial unless licensed.
 - **PAD / anti-spoof** is not KYC-certified.
 - Trusted LAN only — no public-internet hardening.
+- Event frame snapshots are best-effort after commit; no automatic retention/pruning yet.
+- Snapshot JPEGs follow the same trusted-LAN visibility model as live video (no JWT).
 
 ## Design docs
 
 - [GOAL-ADVISOR.md](./GOAL-ADVISOR.md) — active-stack completion and retirement record
 - [apps/edge/README.md](./apps/edge/README.md) — edge runtime and operations
-- [DESIGN.md](./DESIGN.md) — BMW M design system
+- [DESIGN.md](./DESIGN.md) — aerospace ops design system
 
 ## License note
 

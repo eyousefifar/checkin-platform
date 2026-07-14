@@ -12,13 +12,13 @@ pub use scrfd::{
 
 use pksp_core::{
     assign_tracks, commit_eligible, evaluate_vote, hud_state, match_top1, mean_l2_embedding,
-    pack_embedding, prefer_commit_track, quality_gate_extended, refine_hud_after_identity,
-    should_vote, track_zone, trajectory_is_walkby, Detection, HudState, IdentityAttempt,
-    MatchResult, SkipReason, TrackerState, ZoneMap,
+    pack_embedding, pose_yaw_signed_approx, prefer_commit_track, quality_gate_extended,
+    refine_hud_after_identity, should_vote, track_zone, trajectory_is_walkby, Detection, HudState,
+    IdentityAttempt, MatchResult, SkipReason, TrackerState, ZoneMap,
 };
 use pksp_db::{
-    commit_identity, daily_attendance_metrics, load_gallery_matrix, local_date_str, CommitOutcome,
-    Settings,
+    attach_event_snapshot, commit_identity, daily_attendance_metrics, event_snapshot_rel_path,
+    events_dir, load_gallery_matrix, local_date_str, CommitOutcome, Settings,
 };
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -241,8 +241,8 @@ mod ort_sessions {
                 .map_err(|e| FaceError::Model(e.to_string()))?;
             for (_name, val) in outputs.iter() {
                 if let Ok((shape, data)) = val.try_extract_tensor::<f32>() {
-                    let shape: Vec<i64> = shape.iter().copied().collect();
-                    let flat: Vec<f32> = data.iter().copied().collect();
+                    let shape: Vec<i64> = shape.to_vec();
+                    let flat: Vec<f32> = data.to_vec();
                     if flat.iter().any(|v| !v.is_finite()) {
                         return Err(FaceError::Decode("non-finite det tensor".into()));
                     }
@@ -316,7 +316,7 @@ mod ort_sessions {
         let mut emb_out: Option<Vec<f32>> = None;
         for (_name, val) in outputs.iter() {
             if let Ok((_shape, data)) = val.try_extract_tensor::<f32>() {
-                emb_out = Some(data.iter().copied().collect());
+                emb_out = Some(data.to_vec());
                 break;
             }
         }
@@ -1005,6 +1005,10 @@ async fn process_detected_faces(
                             name,
                             kind,
                         }) => {
+                            let event_ts = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs_f64();
                             attempt = IdentityAttempt::Committed;
                             if let Some(t) = tracker
                                 .tracks
@@ -1014,11 +1018,32 @@ async fn process_detected_faces(
                                 t.last_commit_ts = Some(ts);
                                 t.state = "committed".into();
                             }
-                            let ts = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs_f64();
-                            let _ = tx.send(json!({
+                            // Best-effort snapshot: never roll back the attendance event.
+                            let bbox_n = [
+                                tr.bbox.0.clamp(0.0, 1.0),
+                                tr.bbox.1.clamp(0.0, 1.0),
+                                tr.bbox.2.clamp(0.0, 1.0),
+                                tr.bbox.3.clamp(0.0, 1.0),
+                            ];
+                            let (snapshot_url, bbox_wire) = match persist_event_snapshot(
+                                pool, settings, event_id, w, h, bgr, bbox_n,
+                            )
+                            .await
+                            {
+                                Ok(_rel) => (
+                                    Some(format!("/api/attendance/events/{event_id}/snapshot")),
+                                    Some(bbox_n),
+                                ),
+                                Err(e) => {
+                                    warn!(
+                                        event_id,
+                                        error = %e,
+                                        "event snapshot persist failed; attendance kept"
+                                    );
+                                    (None, None)
+                                }
+                            };
+                            let mut msg = json!({
                                 "type": "attendance",
                                 "event_id": event_id,
                                 "employee_id": commit.employee_id,
@@ -1026,8 +1051,17 @@ async fn process_detected_faces(
                                 "kind": kind,
                                 "camera_id": camera_id,
                                 "score": commit.avg_score,
-                                "ts": ts,
-                            }));
+                                "ts": event_ts,
+                            });
+                            msg["snapshot_url"] = match snapshot_url {
+                                Some(url) => json!(url),
+                                None => json!(null),
+                            };
+                            msg["bbox"] = match bbox_wire {
+                                Some(b) => json!([b[0], b[1], b[2], b[3]]),
+                                None => json!(null),
+                            };
+                            let _ = tx.send(msg);
                         }
                         Ok(CommitOutcome::Skipped(reason)) => {
                             attempt = IdentityAttempt::Skipped(reason);
@@ -1059,6 +1093,88 @@ async fn process_detected_faces(
         }));
     }
     out
+}
+
+/// Encode a BGR frame as a bounded JPEG (max long edge 640) for event snapshots.
+/// Returns encoded JPEG bytes.
+pub fn encode_event_snapshot_jpeg(w: u32, h: u32, bgr: &[u8]) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("empty frame".into());
+    }
+    let expected = (w as usize).saturating_mul(h as usize).saturating_mul(3);
+    if bgr.len() < expected {
+        return Err("bgr buffer too short".into());
+    }
+    // BGR → RGB
+    let mut rgb = Vec::with_capacity(expected);
+    for chunk in bgr[..expected].chunks_exact(3) {
+        rgb.push(chunk[2]);
+        rgb.push(chunk[1]);
+        rgb.push(chunk[0]);
+    }
+    let img =
+        image::RgbImage::from_raw(w, h, rgb).ok_or_else(|| "rgb rebuild failed".to_string())?;
+    // Bound long edge to 640 (plan: bounded 640×360-class JPEG).
+    const MAX_LONG: u32 = 640;
+    let long = w.max(h);
+    let scaled = if long > MAX_LONG {
+        let scale = MAX_LONG as f32 / long as f32;
+        let nw = ((w as f32) * scale).round().max(1.0) as u32;
+        let nh = ((h as f32) * scale).round().max(1.0) as u32;
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    scaled
+        .write_to(&mut cursor, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("jpeg encode: {e}"))?;
+    Ok(buf)
+}
+
+/// Best-effort: write JPEG under DATA_DIR/events/<id>.jpg and attach DB metadata.
+/// On DB failure after write, removes the file. Never undoes the attendance event.
+pub async fn persist_event_snapshot(
+    pool: &SqlitePool,
+    settings: &Settings,
+    event_id: i64,
+    w: u32,
+    h: u32,
+    bgr: &[u8],
+    bbox_n: [f32; 4],
+) -> anyhow::Result<String> {
+    let rel = event_snapshot_rel_path(event_id);
+    let dir = events_dir(settings);
+    let abs = settings.data_dir.join(&rel);
+    let tmp = abs.with_extension("jpg.tmp");
+    let frame = bgr.to_vec();
+    let write_abs = abs.clone();
+    let write_tmp = tmp.clone();
+
+    // JPEG resize/encode and filesystem I/O are blocking. Keep them off the
+    // Tokio worker that is also serving WebSockets and API requests.
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        let jpeg = encode_event_snapshot_jpeg(w, h, &frame).map_err(|e| anyhow::anyhow!(e))?;
+        let result = (|| -> anyhow::Result<()> {
+            std::fs::write(&write_tmp, &jpeg)?;
+            std::fs::rename(&write_tmp, &write_abs)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&write_tmp);
+        }
+        result
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("snapshot writer join failed: {e}"))??;
+
+    if let Err(e) = attach_event_snapshot(pool, event_id, &rel, bbox_n).await {
+        let _ = tokio::fs::remove_file(&abs).await;
+        return Err(e);
+    }
+    Ok(rel)
 }
 
 /// Crop bbox to grayscale luma for blur/exposure quality extensions.
@@ -1161,6 +1277,89 @@ pub fn validate_enroll_image_bytes(data: &[u8], settings: &Settings) -> Result<S
         .decode()
         .map_err(|_| "unsupported or corrupt image".to_string())?;
     Ok(ext.to_string())
+}
+
+/// Browser-guided enrollment preview: quality + pose only — never embeddings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnrollmentPreview {
+    pub accepted: bool,
+    pub reason: Option<String>,
+    /// Normalized xyxy bbox in [0,1], when exactly one face was detected.
+    pub bbox: Option<[f32; 4]>,
+    /// Signed yaw degrees when landmarks available; `None` if no face or no landmarks.
+    pub yaw: Option<f32>,
+    pub face_count: usize,
+}
+
+/// Analyze one candidate enrollment frame for guided capture.
+///
+/// Uses the same size/detection/blur/pose gates as enrollment. Returns no embeddings.
+/// Ordinary rejections (no face, multiple faces, quality) are `Ok` with `accepted: false`.
+/// Structural engine failures are `Err`.
+pub fn analyze_enrollment_preview(
+    engine: &dyn FaceEngine,
+    settings: &Settings,
+    data: &[u8],
+) -> Result<EnrollmentPreview, FaceError> {
+    if !engine.ready() {
+        return Err(FaceError::NotReady);
+    }
+    validate_enroll_image_bytes(data, settings).map_err(|_| FaceError::InvalidInput)?;
+    let (w, h, bgr) = decode_to_bgr(data).map_err(|_| FaceError::InvalidInput)?;
+    let faces = engine.detect_and_embed(w, h, &bgr)?;
+    let face_count = faces.len();
+    if face_count == 0 {
+        return Ok(EnrollmentPreview {
+            accepted: false,
+            reason: Some("no_face".into()),
+            bbox: None,
+            yaw: None,
+            face_count: 0,
+        });
+    }
+    if face_count > 1 {
+        return Ok(EnrollmentPreview {
+            accepted: false,
+            reason: Some("multiple_faces".into()),
+            bbox: None,
+            yaw: None,
+            face_count,
+        });
+    }
+    let face = &faces[0];
+    if face.embedding.iter().any(|v| !v.is_finite()) {
+        return Err(FaceError::BadEmbedding);
+    }
+    let bbox_n = [
+        (face.bbox.0 / w as f32).clamp(0.0, 1.0),
+        (face.bbox.1 / h as f32).clamp(0.0, 1.0),
+        (face.bbox.2 / w as f32).clamp(0.0, 1.0),
+        (face.bbox.3 / h as f32).clamp(0.0, 1.0),
+    ];
+    let yaw = face.landmarks.as_ref().map(pose_yaw_signed_approx);
+    let gray = crop_gray_luma(&bgr, w, h, face.bbox);
+    let q = quality_gate_extended(
+        face.det_score,
+        face.bbox,
+        settings.min_det_score,
+        settings.min_face_px,
+        w as i32,
+        h as i32,
+        false,
+        face.landmarks.as_ref(),
+        gray.as_ref().map(|(g, gw, gh)| (g.as_slice(), *gw, *gh)),
+        settings.pose_max_yaw,
+        settings.blur_min_var,
+        0.0,
+        255.0,
+    );
+    Ok(EnrollmentPreview {
+        accepted: q.ok,
+        reason: q.reason,
+        bbox: Some(bbox_n),
+        yaw,
+        face_count: 1,
+    })
 }
 
 fn analyze_bgr_image(
@@ -2045,6 +2244,151 @@ mod enroll_tests {
         assert!(validate_enroll_image_bytes(&big, &s2).is_err());
         assert!(validate_enroll_image_bytes(b"not-an-image", &s).is_err());
         assert!(validate_enroll_image_bytes(&solid_png(64, 64, 180), &s).is_ok());
+    }
+
+    #[test]
+    fn preview_accepts_single_face_with_normalized_bbox() {
+        let (_t, settings) = temp_settings(1);
+        let engine = SingleFaceEngine {
+            dim: settings.embedding_dim,
+        };
+        let png = solid_png(80, 80, 120);
+        let prev = analyze_enrollment_preview(&engine, &settings, &png).unwrap();
+        assert!(prev.accepted);
+        assert_eq!(prev.face_count, 1);
+        assert!(prev.reason.is_none());
+        let bbox = prev.bbox.expect("bbox");
+        assert!(bbox[0] >= 0.0 && bbox[2] <= 1.0);
+        assert!(bbox[1] >= 0.0 && bbox[3] <= 1.0);
+        assert!(bbox[2] > bbox[0] && bbox[3] > bbox[1]);
+        // SingleFaceEngine has no landmarks
+        assert!(prev.yaw.is_none());
+    }
+
+    #[test]
+    fn preview_rejects_no_face() {
+        let (_t, settings) = temp_settings(1);
+        let engine = SingleFaceEngine {
+            dim: settings.embedding_dim,
+        };
+        // near-black → SingleFaceEngine returns empty
+        let png = solid_png(80, 80, 0);
+        let prev = analyze_enrollment_preview(&engine, &settings, &png).unwrap();
+        assert!(!prev.accepted);
+        assert_eq!(prev.reason.as_deref(), Some("no_face"));
+        assert_eq!(prev.face_count, 0);
+        assert!(prev.bbox.is_none());
+    }
+
+    #[test]
+    fn preview_rejects_multiple_faces() {
+        let (_t, settings) = temp_settings(1);
+        let engine = MultiFaceEngine {
+            dim: settings.embedding_dim,
+        };
+        let png = solid_png(80, 80, 120);
+        let prev = analyze_enrollment_preview(&engine, &settings, &png).unwrap();
+        assert!(!prev.accepted);
+        assert_eq!(prev.reason.as_deref(), Some("multiple_faces"));
+        assert_eq!(prev.face_count, 2);
+        assert!(prev.bbox.is_none());
+    }
+
+    #[test]
+    fn preview_systemic_engine_failure() {
+        let (_t, settings) = temp_settings(1);
+        let engine = BoomEngine;
+        let png = solid_png(80, 80, 120);
+        let err = analyze_enrollment_preview(&engine, &settings, &png).unwrap_err();
+        assert!(matches!(err, FaceError::Model(_)));
+    }
+
+    #[test]
+    fn preview_invalid_payload() {
+        let (_t, settings) = temp_settings(1);
+        let engine = SingleFaceEngine {
+            dim: settings.embedding_dim,
+        };
+        let err = analyze_enrollment_preview(&engine, &settings, b"not-an-image").unwrap_err();
+        assert_eq!(err, FaceError::InvalidInput);
+    }
+
+    struct SignedYawEngine {
+        dim: usize,
+        landmarks: [[f32; 2]; 5],
+    }
+
+    impl FaceEngine for SignedYawEngine {
+        fn ready(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            VISION_MODEL
+        }
+        fn execution_provider(&self) -> &str {
+            "test"
+        }
+        fn detect_and_embed(
+            &self,
+            width: u32,
+            height: u32,
+            _bgr: &[u8],
+        ) -> Result<Vec<DetectedFace>, FaceError> {
+            let emb = vec![0.1; self.dim];
+            Ok(vec![DetectedFace {
+                bbox: (10.0, 10.0, width as f32 - 10.0, height as f32 - 10.0),
+                det_score: 0.99,
+                embedding: pksp_core::l2_normalize(&emb),
+                landmarks: Some(self.landmarks),
+            }])
+        }
+    }
+
+    #[test]
+    fn preview_returns_signed_yaw() {
+        let (_t, mut settings) = temp_settings(1);
+        // Allow large yaw so quality does not reject — we only check signed value.
+        settings.pose_max_yaw = 90.0;
+        // Nose right of eye mid → positive
+        let engine = SignedYawEngine {
+            dim: settings.embedding_dim,
+            landmarks: [
+                [20.0, 40.0],
+                [50.0, 40.0],
+                [55.0, 60.0],
+                [25.0, 80.0],
+                [50.0, 80.0],
+            ],
+        };
+        let png = solid_png(80, 80, 120);
+        let prev = analyze_enrollment_preview(&engine, &settings, &png).unwrap();
+        let yaw = prev.yaw.expect("yaw");
+        assert!(yaw > 0.0, "expected positive signed yaw, got {yaw}");
+    }
+
+    #[test]
+    fn encode_event_snapshot_jpeg_bounds_and_decodes() {
+        let w = 800u32;
+        let h = 450u32;
+        let mut bgr = vec![0u8; (w * h * 3) as usize];
+        for (i, px) in bgr.chunks_exact_mut(3).enumerate() {
+            px[0] = (i % 200) as u8;
+            px[1] = 40;
+            px[2] = 80;
+        }
+        let jpeg = encode_event_snapshot_jpeg(w, h, &bgr).unwrap();
+        assert!(!jpeg.is_empty());
+        let im = image::load_from_memory(&jpeg).unwrap();
+        assert!(im.width() <= 640);
+        assert!(im.height() <= 640);
+        // aspect roughly preserved
+        let aspect = im.width() as f32 / im.height() as f32;
+        assert!((aspect - (800.0 / 450.0)).abs() < 0.05);
+    }
+
+    #[test]
+    fn encode_event_snapshot_rejects_short_buffer() {
+        assert!(encode_event_snapshot_jpeg(10, 10, &[0u8; 10]).is_err());
     }
 
     #[tokio::test]

@@ -139,7 +139,7 @@ export function CameraTile({
       />
 
       {!showVideo && (
-        <div className="absolute inset-0 z-[1] flex items-center justify-center bg-gradient-to-b from-[#0a0a0a] to-[#111]">
+        <div className="absolute inset-0 z-[1] flex items-center justify-center bg-soft">
           <div className="px-4 text-center">
             <div
               className="font-mono text-xs uppercase tracking-label text-body"
@@ -173,10 +173,10 @@ export function CameraTile({
       <FaceHudCanvas faces={faces} width={size.w} height={size.h} />
 
       <div className="absolute left-3 top-3 z-30 flex flex-wrap items-center gap-2">
-        <span className="bg-black/70 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
+        <span className="bg-canvas/80 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
           {name}
         </span>
-        <span className="border border-m-blue-dark/60 bg-black/70 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
+        <span className="border border-cyan/60 bg-canvas/80 px-2 py-1 text-xs font-bold uppercase tracking-label text-ink">
           {direction}
         </span>
       </div>
@@ -184,10 +184,10 @@ export function CameraTile({
         <span
           className={`px-2 py-1 text-xs font-bold uppercase tracking-label ${
             online === true
-              ? "bg-success/20 text-success"
+              ? "bg-signal/20 text-signal"
               : online === false
-                ? "bg-m-red/20 text-m-red"
-                : "bg-black/70 text-body"
+                ? "bg-danger/20 text-danger"
+                : "bg-canvas/80 text-body"
           }`}
           data-camera-status={cameraStatus}
           data-testid="camera-capture-badge"
@@ -197,10 +197,10 @@ export function CameraTile({
         <span
           className={`px-2 py-1 text-xs font-bold uppercase tracking-label ${
             videoState === "playing"
-              ? "bg-success/20 text-success"
+              ? "bg-signal/20 text-signal"
               : videoState === "error"
-                ? "bg-m-red/20 text-m-red"
-                : "bg-black/70 text-body"
+                ? "bg-danger/20 text-danger"
+                : "bg-canvas/80 text-body"
           }`}
           data-testid="browser-video-badge"
           data-video-badge={videoState}
@@ -208,7 +208,7 @@ export function CameraTile({
           {videoLabel}
         </span>
         {fps != null && (
-          <span className="bg-black/70 px-2 py-1 font-mono text-xs text-body">
+          <span className="bg-canvas/80 px-2 py-1 font-mono text-xs text-body">
             {fps.toFixed(1)} FPS
           </span>
         )}

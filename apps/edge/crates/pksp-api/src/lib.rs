@@ -205,9 +205,17 @@ pub fn app(state: AppState) -> Router {
             "/api/employees/{id}/recompute-embedding",
             post(routes::recompute_embedding),
         )
+        .route(
+            "/api/enrollment/analyze",
+            post(routes::analyze_enrollment_frame).layer(DefaultBodyLimit::max(enroll_body_limit)),
+        )
         .route("/api/attendance/daily", get(routes::daily))
         .route("/api/attendance/daily.csv", get(routes::daily_csv))
         .route("/api/attendance/events", get(routes::events))
+        .route(
+            "/api/attendance/events/{id}/snapshot",
+            get(routes::event_snapshot),
+        )
         .route("/api/cameras", get(routes::list_cameras_route))
         .route("/api/ws/live", get(routes::ws_live))
         .layer(cors)

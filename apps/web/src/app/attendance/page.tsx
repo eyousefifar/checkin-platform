@@ -10,9 +10,10 @@ import {
 } from "react";
 import { API_URL, api, getToken } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { EventMatchReveal } from "@/components/EventMatchReveal";
 import { useHealth } from "@/hooks/useHealth";
 import { calendarDateInZone, timeInZone } from "@/lib/dateTime";
-import type { DailyRow, RawAttendanceEvent } from "@/lib/types";
+import type { AttendanceMsg, DailyRow, RawAttendanceEvent } from "@/lib/types";
 
 export default function AttendancePage() {
   const { data: health, loading: healthLoading, error: healthError } = useHealth();
@@ -29,6 +30,7 @@ export default function AttendancePage() {
   const [eventsError, setEventsError] = useState("");
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  const [inspect, setInspect] = useState<AttendanceMsg | null>(null);
   const requestGenRef = useRef(0);
 
   useEffect(() => {
@@ -120,6 +122,21 @@ export default function AttendancePage() {
     });
   }
 
+  function inspectEvent(ev: RawAttendanceEvent, employeeName: string) {
+    setInspect({
+      type: "attendance",
+      event_id: ev.id,
+      employee_id: ev.employee_id ?? 0,
+      name: employeeName,
+      kind: ev.kind,
+      camera_id: ev.camera_id,
+      score: ev.score,
+      ts: Date.parse(ev.ts) / 1000,
+      snapshot_url: ev.snapshot_url ?? null,
+      bbox: ev.bbox ?? null,
+    });
+  }
+
   async function exportCsv() {
     if (!date) return;
     const token = getToken();
@@ -162,7 +179,7 @@ export default function AttendancePage() {
           type="button"
           onClick={() => void exportCsv()}
           disabled={!date}
-          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-40"
+          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:opacity-40"
         >
           Export CSV
         </button>
@@ -180,7 +197,7 @@ export default function AttendancePage() {
 
       {healthError && !timezone && (
         <div
-          className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
+          className="mb-4 border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger"
           role="alert"
         >
           Health unavailable: {healthError}. Retrying…
@@ -201,7 +218,7 @@ export default function AttendancePage() {
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="border border-hairline bg-card px-2 py-1 font-mono text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+              className="border border-hairline bg-card px-2 py-1 font-mono text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
             />
             <span
               data-testid="attendance-timezone"
@@ -216,9 +233,9 @@ export default function AttendancePage() {
                   type="button"
                   onClick={() => setStatus(c)}
                   aria-pressed={status === c}
-                  className={`border px-3 py-1 text-xs font-bold uppercase tracking-label focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark ${
+                  className={`border px-3 py-1 text-xs font-bold uppercase tracking-label focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan ${
                     status === c
-                      ? "border-m-blue-dark text-ink"
+                      ? "border-cyan text-ink"
                       : "border-hairline text-body hover:text-ink"
                   }`}
                 >
@@ -230,7 +247,7 @@ export default function AttendancePage() {
 
           {showDailyError && (
             <div
-              className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
+              className="mb-4 border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger"
               role="alert"
               data-testid="attendance-error"
             >
@@ -300,7 +317,7 @@ export default function AttendancePage() {
                               aria-expanded={isOpen}
                               aria-controls={detailId}
                               onClick={() => toggleExpand(r.employee_id)}
-                              className="border border-hairline px-2 py-1 text-xs font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+                              className="border border-hairline px-2 py-1 text-xs font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
                               data-testid={`expand-${r.employee_id}`}
                             >
                               {isOpen ? "Hide" : "Events"}
@@ -367,25 +384,35 @@ export default function AttendancePage() {
                                       <li
                                         key={ev.id}
                                         data-testid={`raw-event-${ev.id}`}
-                                        className="flex flex-wrap gap-x-3 gap-y-1"
+                                        className="list-none"
                                       >
-                                        <span data-field="time">
-                                          {timeInZone(ev.ts, zone)}
-                                        </span>
-                                        <span
-                                          data-field="kind"
-                                          className="uppercase"
+                                        <button
+                                          type="button"
+                                          onClick={() => inspectEvent(ev, r.full_name)}
+                                          aria-label={`Inspect event ${ev.id} for ${r.full_name}`}
+                                          className="flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-1 border border-transparent px-2 py-2 text-left hover:border-hairline hover:bg-elevated/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
                                         >
-                                          {ev.kind.replace(/_/g, "-")}
-                                        </span>
-                                        <span data-field="camera">
-                                          {ev.camera_id}
-                                        </span>
-                                        <span data-field="score">
-                                          {ev.score != null
-                                            ? ev.score.toFixed(2)
-                                            : "—"}
-                                        </span>
+                                          <span data-field="time">
+                                            {timeInZone(ev.ts, zone)}
+                                          </span>
+                                          <span
+                                            data-field="kind"
+                                            className="uppercase"
+                                          >
+                                            {ev.kind.replace(/_/g, "-")}
+                                          </span>
+                                          <span data-field="camera">
+                                            {ev.camera_id}
+                                          </span>
+                                          <span data-field="score">
+                                            {ev.score != null
+                                              ? ev.score.toFixed(2)
+                                              : "—"}
+                                          </span>
+                                          <span className="ml-auto text-[10px] uppercase tracking-label text-cyan">
+                                            {ev.snapshot_url ? "Inspect frame" : "Inspect event"}
+                                          </span>
+                                        </button>
                                       </li>
                                     ))}
                                   </ul>
@@ -403,6 +430,11 @@ export default function AttendancePage() {
           )}
         </>
       )}
+      <EventMatchReveal
+        event={inspect}
+        timezone={timezone}
+        onClose={() => setInspect(null)}
+      />
     </div>
   );
 }

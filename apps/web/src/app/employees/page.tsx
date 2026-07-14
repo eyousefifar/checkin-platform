@@ -57,7 +57,7 @@ export default function EmployeesPage() {
         </div>
         <Link
           href="/employees/new"
-          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+          className="border border-ink px-6 py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
         >
           Add employee
         </Link>
@@ -75,14 +75,14 @@ export default function EmployeesPage() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search name, code, or department…"
-          className="mt-2 w-full max-w-md border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-m-blue-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+          className="mt-2 w-full max-w-md border border-hairline bg-card px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-cyan focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
           data-testid="employee-search"
         />
       </div>
 
       {showError && (
         <div
-          className="mb-4 border border-m-red/40 bg-m-red/10 px-4 py-3 text-sm text-m-red"
+          className="mb-4 border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-danger"
           role="alert"
           data-testid="employees-error"
         >
@@ -136,7 +136,7 @@ export default function EmployeesPage() {
                   <td className="px-4 py-3 font-mono text-xs">
                     <Link
                       href={`/employees/${e.id}`}
-                      className="text-ink underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+                      className="text-ink underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
                     >
                       {e.employee_code}
                     </Link>
@@ -149,7 +149,7 @@ export default function EmployeesPage() {
                   <td className="px-4 py-3">
                     <span
                       className={
-                        e.embedding_ready ? "text-success" : "text-body"
+                        e.embedding_ready ? "text-signal" : "text-body"
                       }
                     >
                       {e.embedding_ready ? "ready" : "missing"}

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { EventTicker } from "./EventTicker";
 import type { AttendanceMsg } from "@/lib/types";
@@ -13,6 +13,8 @@ const sample: AttendanceMsg = {
   score: 0.93,
   // 2026-07-12T20:00:00Z
   ts: Math.floor(Date.parse("2026-07-12T20:00:00.000Z") / 1000),
+  snapshot_url: "/api/attendance/events/7/snapshot",
+  bbox: [0.1, 0.1, 0.4, 0.5],
 };
 
 describe("EventTicker", () => {
@@ -44,5 +46,36 @@ describe("EventTicker", () => {
   it("renders em dash when timezone prop is omitted", () => {
     render(<EventTicker events={[sample]} />);
     expect(screen.getByTestId("event-ticker-time").textContent).toBe("—");
+  });
+
+  it("opens match reveal when an event row is activated", () => {
+    render(<EventTicker events={[sample]} timezone="UTC" />);
+    const item = screen.getByTestId("event-ticker-item");
+    expect(item.tagName).toBe("BUTTON");
+    fireEvent.click(item);
+    expect(screen.getByTestId("event-match-reveal")).toBeTruthy();
+    expect(screen.getByTestId("reveal-name").textContent).toContain("Ada");
+  });
+
+  it("restores focus when a new live event arrives behind the reveal", () => {
+    const { rerender } = render(<EventTicker events={[sample]} timezone="UTC" />);
+    const trigger = screen.getByRole("button", { name: /inspect event 7/i });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    rerender(
+      <EventTicker
+        events={[
+          { ...sample, event_id: 8, name: "Grace Hopper" },
+          sample,
+        ]}
+        timezone="UTC"
+      />,
+    );
+    fireEvent.click(screen.getByTestId("reveal-close"));
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /inspect event 7/i }),
+    );
   });
 });

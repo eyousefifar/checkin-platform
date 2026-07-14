@@ -401,3 +401,152 @@ async fn enrollment_limits_over_dimension_400() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert!(list_employee_images(&pool, eid).await.unwrap().is_empty());
 }
+
+// ── Enrollment preview analyze (guided capture) ──────────────────────────────
+
+#[tokio::test]
+async fn analyze_requires_auth() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let router = app(state);
+    let png = solid_png(64, 64, 140);
+    let (boundary, body) = multipart_body(&[("file", &png, "a.png")]);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/enrollment/analyze")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn analyze_accepts_single_face() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let password = state.settings.admin_password.clone();
+    let router = app(state);
+    let token = login_token(&router, &password).await;
+    let png = solid_png(64, 64, 140);
+    let (boundary, body) = multipart_body(&[("file", &png, "face.png")]);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/enrollment/analyze")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["accepted"], true, "{v}");
+    assert_eq!(v["face_count"], 1);
+    assert!(v["reason"].is_null());
+    assert!(v["bbox"].is_array(), "normalized bbox required: {v}");
+    let bbox = v["bbox"].as_array().unwrap();
+    assert_eq!(bbox.len(), 4);
+    // No embeddings over the wire
+    assert!(v.get("embedding").is_none());
+    assert!(v.get("embeddings").is_none());
+}
+
+#[tokio::test]
+async fn analyze_rejects_no_face() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let password = state.settings.admin_password.clone();
+    let router = app(state);
+    let token = login_token(&router, &password).await;
+    // near-black → test engine returns zero faces
+    let png = solid_png(64, 64, 0);
+    let (boundary, body) = multipart_body(&[("file", &png, "dark.png")]);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/enrollment/analyze")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["accepted"], false);
+    assert_eq!(v["reason"], "no_face");
+    assert_eq!(v["face_count"], 0);
+    assert!(v["bbox"].is_null());
+}
+
+#[tokio::test]
+async fn analyze_invalid_payload_400() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let password = state.settings.admin_password.clone();
+    let router = app(state);
+    let token = login_token(&router, &password).await;
+    let (boundary, body) = multipart_body(&[("file", b"not-an-image", "x.png")]);
+    let res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/enrollment/analyze")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn analyze_empty_batch_400() {
+    let db = temp_db();
+    let state = test_state(&db).await;
+    let password = state.settings.admin_password.clone();
+    let router = app(state);
+    let token = login_token(&router, &password).await;
+    let boundary = "----empty";
+    let body = format!("--{boundary}--\r\n").into_bytes();
+    let res = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/enrollment/analyze")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

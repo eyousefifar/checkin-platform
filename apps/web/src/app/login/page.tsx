@@ -52,18 +52,18 @@ export default function LoginPage() {
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="mt-2 w-full border border-hairline bg-soft px-3 py-2 text-sm text-ink outline-none focus:border-m-blue-dark focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+          className="mt-2 w-full border border-hairline bg-soft px-3 py-2 text-sm text-ink outline-none focus:border-cyan focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
           autoFocus
         />
         {error && (
-          <p className="mt-3 text-sm text-m-red" role="alert">
+          <p className="mt-3 text-sm text-danger" role="alert">
             {error}
           </p>
         )}
         <button
           type="submit"
           disabled={loading}
-          className="mt-6 w-full border border-ink bg-canvas py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
+          className="mt-6 w-full border border-ink bg-canvas py-3 text-sm font-bold uppercase tracking-label text-ink hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:opacity-50"
         >
           {loading ? "…" : "Sign in"}
         </button>

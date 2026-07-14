@@ -104,9 +104,13 @@ pub fn blur_ok(gray: &[u8], width: usize, height: usize, min_var: f32) -> bool {
     blur_variance(gray, width, height) >= min_var
 }
 
-/// Approximate yaw from 5-point landmarks: [left_eye, right_eye, nose, left_mouth, right_mouth].
-/// Returns approximate |yaw| degrees (0 = frontal). Heuristic only — not a full 3D solve.
-pub fn pose_yaw_approx(landmarks: &[[f32; 2]; 5]) -> f32 {
+/// Approximate signed yaw from 5-point landmarks:
+/// [left_eye, right_eye, nose, left_mouth, right_mouth].
+///
+/// Positive = nose right of eye midline (subject turned left from camera view /
+/// viewer-right). Negative = nose left of midline. Heuristic only — not a full 3D solve.
+/// Clamped to ±90°.
+pub fn pose_yaw_signed_approx(landmarks: &[[f32; 2]; 5]) -> f32 {
     let le = landmarks[0];
     let re = landmarks[1];
     let nose = landmarks[2];
@@ -115,7 +119,13 @@ pub fn pose_yaw_approx(landmarks: &[[f32; 2]; 5]) -> f32 {
     // nose offset relative to inter-ocular distance
     let offset = (nose[0] - eye_mid_x) / eye_dist;
     // map roughly: |offset| 0.5 ~ 45°
-    (offset.abs() * 90.0).min(90.0)
+    (offset * 90.0).clamp(-90.0, 90.0)
+}
+
+/// Approximate |yaw| degrees (0 = frontal). Compatibility wrapper over
+/// [`pose_yaw_signed_approx`].
+pub fn pose_yaw_approx(landmarks: &[[f32; 2]; 5]) -> f32 {
+    pose_yaw_signed_approx(landmarks).abs()
 }
 
 pub fn pose_ok(landmarks: Option<&[[f32; 2]; 5]>, max_yaw_deg: f32) -> bool {
@@ -288,6 +298,7 @@ mod tests {
         ];
         assert!(pose_ok(Some(&lm), 45.0));
         assert!(pose_yaw_approx(&lm) < 20.0);
+        assert!(pose_yaw_signed_approx(&lm).abs() < 20.0);
     }
 
     #[test]
@@ -300,6 +311,46 @@ mod tests {
             [50.0, 80.0],
         ];
         assert!(!pose_ok(Some(&lm), 30.0));
+    }
+
+    #[test]
+    fn pose_yaw_signed_preserves_direction() {
+        // Nose right of eye mid → positive signed yaw
+        let right = [
+            [20.0, 40.0],
+            [50.0, 40.0],
+            [55.0, 60.0],
+            [25.0, 80.0],
+            [50.0, 80.0],
+        ];
+        let yaw_r = pose_yaw_signed_approx(&right);
+        assert!(yaw_r > 20.0, "expected positive yaw, got {yaw_r}");
+        assert_eq!(pose_yaw_approx(&right), yaw_r.abs());
+
+        // Nose left of eye mid → negative signed yaw
+        let left = [
+            [40.0, 40.0],
+            [70.0, 40.0],
+            [30.0, 60.0],
+            [45.0, 80.0],
+            [70.0, 80.0],
+        ];
+        let yaw_l = pose_yaw_signed_approx(&left);
+        assert!(yaw_l < -20.0, "expected negative yaw, got {yaw_l}");
+        assert_eq!(pose_yaw_approx(&left), yaw_l.abs());
+    }
+
+    #[test]
+    fn pose_yaw_signed_frontal_near_zero() {
+        let lm = [
+            [40.0, 40.0],
+            [80.0, 40.0],
+            [60.0, 60.0],
+            [45.0, 80.0],
+            [75.0, 80.0],
+        ];
+        let signed = pose_yaw_signed_approx(&lm);
+        assert!(signed.abs() < 5.0, "frontal should be near 0, got {signed}");
     }
 
     #[test]

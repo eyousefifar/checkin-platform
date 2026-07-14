@@ -34,6 +34,7 @@ vi.mock("@/lib/api", () => ({
   API_URL: "http://localhost:8000",
   api: (...args: unknown[]) => apiMock(...args),
   getToken: () => null,
+  snapshotAbsoluteUrl: (path: string) => `http://localhost:8000${path}`,
 }));
 
 import AttendancePage from "./page";
@@ -104,6 +105,8 @@ const rawEvents: RawAttendanceEvent[] = [
     score: 0.88,
     ts: "2026-07-12T05:00:00Z",
     local_date: "2026-07-12",
+    snapshot_url: "/api/attendance/events/10/snapshot",
+    bbox: [0.2, 0.2, 0.6, 0.7],
   },
   {
     id: 11,
@@ -216,6 +219,23 @@ describe("Attendance explainability", () => {
     fireEvent.click(screen.getByTestId("expand-1"));
     // 05:00 UTC → 08:30 Tehran
     expect(within(screen.getByTestId("raw-event-10")).getByText("08:30:00")).toBeTruthy();
+  });
+
+  it("opens the sci-fi match reveal for a stored historical event", async () => {
+    render(<AttendancePage />);
+    await waitFor(() => expect(screen.getByText("Ada Lovelace")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("expand-1"));
+
+    fireEvent.click(
+      within(screen.getByTestId("raw-event-10")).getByRole("button", {
+        name: /inspect event 10/i,
+      }),
+    );
+
+    expect(screen.getByTestId("event-match-reveal")).toBeTruthy();
+    expect(screen.getByTestId("reveal-name").textContent).toContain("Ada Lovelace");
+    expect(screen.getByTestId("reveal-snapshot")).toBeTruthy();
+    expect(screen.getByTestId("reveal-bbox")).toBeTruthy();
   });
 
   it("shows per-row empty without pairing error", async () => {

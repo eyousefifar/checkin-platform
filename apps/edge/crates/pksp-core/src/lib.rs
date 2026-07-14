@@ -20,8 +20,8 @@ pub use fsm::{
 };
 pub use match_::{cosine_scores, match_top1, MatchResult};
 pub use quality::{
-    blur_ok, blur_variance, exposure_ok, mean_luma, pose_ok, pose_yaw_approx, quality_gate,
-    quality_gate_extended, QualityResult,
+    blur_ok, blur_variance, exposure_ok, mean_luma, pose_ok, pose_yaw_approx,
+    pose_yaw_signed_approx, quality_gate, quality_gate_extended, QualityResult,
 };
 pub use scene::{
     bbox_centroid, commit_eligible, default_door_zones, hud_state, motion_direction_hint,

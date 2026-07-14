@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { GuidedFaceCapture } from "@/components/GuidedFaceCapture";
 import { api } from "@/lib/api";
 import type { Employee, EnrollmentResult } from "@/lib/types";
 
@@ -23,6 +24,7 @@ export default function EmployeeDetailPage() {
     null,
   );
   const [files, setFiles] = useState<FileList | null>(null);
+  const [guidedFiles, setGuidedFiles] = useState<File[]>([]);
   const [busy, setBusy] = useState(false);
 
   // Edit form — reinitialized whenever server-confirmed employee changes.
@@ -93,9 +95,21 @@ export default function EmployeeDetailPage() {
     }
   }
 
+  const onGuidedChange = useCallback((list: File[]) => {
+    setGuidedFiles(list);
+  }, []);
+
   async function upload(e: FormEvent) {
     e.preventDefault();
-    if (!files?.length) return;
+    const manual = files ? Array.from(files) : [];
+    const toUpload =
+      guidedFiles.length > 0
+        ? [
+            ...guidedFiles,
+            ...manual.filter((f) => !guidedFiles.some((g) => g.name === f.name)),
+          ]
+        : manual;
+    if (!toUpload.length) return;
     setBusy(true);
     setError("");
     setStatusMsg("");
@@ -103,7 +117,7 @@ export default function EmployeeDetailPage() {
     setRecomputeResult(null);
     try {
       const fd = new FormData();
-      Array.from(files).forEach((f) => fd.append("files", f));
+      toUpload.forEach((f) => fd.append("files", f));
       const up = await api<EnrollmentResult>(`/api/employees/${id}/images`, {
         method: "POST",
         body: fd,
@@ -173,25 +187,28 @@ export default function EmployeeDetailPage() {
     <div className="mx-auto min-w-0 max-w-2xl p-4 md:p-6">
       <Link
         href="/employees"
-        className="text-sm uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+        className="text-sm uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
       >
         ← Employees
       </Link>
       {error && (
-        <p className="mt-4 text-m-red" role="alert" data-testid="detail-error">
+        <p className="mt-4 text-danger" role="alert" data-testid="detail-error">
           {error}
         </p>
       )}
       {emp && (
         <>
-          <h1 className="mt-4 text-2xl font-bold uppercase tracking-wide text-ink">
+          <p className="mt-4 text-[10px] font-bold uppercase tracking-label text-muted">
+            Configure
+          </p>
+          <h1 className="text-2xl font-bold uppercase tracking-wide text-ink">
             {emp.full_name}
           </h1>
           <p className="mt-1 font-mono text-sm text-body">
             <span data-testid="employee-code-display">{emp.employee_code}</span>
             {" · "}
             {emp.department || "no dept"} · embedding{" "}
-            <span className={emp.embedding_ready ? "text-success" : "text-warning"}>
+            <span className={emp.embedding_ready ? "text-signal" : "text-warning"}>
               {emp.embedding_ready ? "ready" : "missing"}
             </span>
             {" · "}
@@ -277,7 +294,7 @@ export default function EmployeeDetailPage() {
             <button
               type="submit"
               disabled={busy}
-              className="border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
+              className="min-h-11 border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:opacity-50"
               data-testid="save-profile"
             >
               Save profile
@@ -301,12 +318,19 @@ export default function EmployeeDetailPage() {
             </ul>
           </div>
 
+          <div className="mt-6">
+            <GuidedFaceCapture
+              onCapturedChange={onGuidedChange}
+              disabled={busy}
+            />
+          </div>
+
           <form onSubmit={upload} className="mt-6 space-y-3">
             <label
               htmlFor="detail-files"
               className="block text-sm font-bold uppercase tracking-label text-body"
             >
-              Upload face images
+              Manual upload fallback
             </label>
             <input
               id="detail-files"
@@ -321,7 +345,7 @@ export default function EmployeeDetailPage() {
               <button
                 type="submit"
                 disabled={busy}
-                className="border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
+                className="min-h-11 border border-ink px-4 py-2 text-sm font-bold uppercase tracking-label hover:bg-elevated focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:opacity-50"
                 data-testid="upload-images"
               >
                 Upload images
@@ -330,7 +354,7 @@ export default function EmployeeDetailPage() {
                 type="button"
                 onClick={recompute}
                 disabled={busy}
-                className="border border-hairline px-4 py-2 text-sm font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark disabled:opacity-50"
+                className="min-h-11 border border-hairline px-4 py-2 text-sm font-bold uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:opacity-50"
                 data-testid="recompute-embedding"
               >
                 Recompute embedding
@@ -339,7 +363,7 @@ export default function EmployeeDetailPage() {
           </form>
 
           {statusMsg && (
-            <p className="mt-3 text-sm text-success" role="status" data-testid="detail-status">
+            <p className="mt-3 text-sm text-signal" role="status" data-testid="detail-status">
               {statusMsg}
             </p>
           )}
@@ -365,9 +389,9 @@ export default function EmployeeDetailPage() {
                   <span className="text-ink">{r.filename}</span>
                   {": "}
                   {r.usable ? (
-                    <span className="text-success">usable</span>
+                    <span className="text-signal">usable</span>
                   ) : (
-                    <span className="text-m-red">
+                    <span className="text-danger">
                       rejected{r.reason ? ` — ${r.reason}` : ""}
                     </span>
                   )}

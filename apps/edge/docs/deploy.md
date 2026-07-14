@@ -84,16 +84,34 @@ Do not guess interfaces in application code. RTSP is TCP-only
 
 Edit `configs/zones.cam_in.json` polygons (normalized 0–1). Disable with `ENABLE_SMART_SCENE=false`.
 
+## Event snapshots
+
+After a successful attendance commit, the edge runtime best-effort encodes the
+current vision frame as a bounded JPEG under `DATA_DIR/events/<event_id>.jpg`
+and stores relative path + normalized face bbox on the event row. Snapshot
+failure never rolls back the attendance event.
+
+- **HTTP:** `GET /api/attendance/events/{id}/snapshot` returns `image/jpeg` with
+  `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- **Auth model:** same trusted-LAN posture as the live dashboard and WHEP path —
+  no JWT. Bind to loopback or a private LAN only.
+- **Wire fields:** live WS attendance messages and authenticated event history
+  include additive `snapshot_url` and `bbox` (null when unavailable).
+- **Retention:** no automatic pruning. Operators must manage disk under
+  `DATA_DIR/events/` (and include it in backups if provenance is required).
+
 ## Backup / restore
 
 ```bash
 # backup
 cp data/pksp-rust.db data/pksp-rust.db.bak
 tar czf enroll-backup.tgz data/enroll
+tar czf events-backup.tgz data/events 2>/dev/null || true
 
 # restore
 cp data/pksp-rust.db.bak data/pksp-rust.db
 tar xzf enroll-backup.tgz
+tar xzf events-backup.tgz 2>/dev/null || true
 ```
 
 ## Recovery (< 10 min)

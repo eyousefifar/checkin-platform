@@ -13,7 +13,7 @@ use pksp_db::{
     deactivate_employee as db_deactivate, employee_dict, list_cameras,
     list_employees as db_list_employees, update_employee_fields, EmployeePatch,
 };
-use pksp_vision::{enroll_images, reload_gallery};
+use pksp_vision::{analyze_enrollment_preview, enroll_images, reload_gallery, FaceError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -216,6 +216,75 @@ pub async fn deactivate_employee(
     Ok(Json(outcome.employee))
 }
 
+/// Authenticated single-frame enrollment preview — quality/pose only, no embeddings.
+pub async fn analyze_enrollment_frame(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<Value>, AppError> {
+    let max_file = state.settings.max_enroll_file_bytes;
+    let mut file: Option<Vec<u8>> = None;
+
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        // Accept only file parts (multipart file fields have a file_name).
+        let Some(_name) = field.file_name().map(|s| s.to_string()) else {
+            return Err(AppError::BadRequest("only file fields are accepted".into()));
+        };
+        if file.is_some() {
+            return Err(AppError::BadRequest(
+                "only one image is accepted for preview analysis".into(),
+            ));
+        }
+        let mut data = Vec::new();
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if data.len().saturating_add(chunk.len()) > max_file {
+                        return Err(AppError::BadRequest(format!(
+                            "file exceeds max size of {max_file} bytes"
+                        )));
+                    }
+                    data.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => return Err(AppError::BadRequest(e.to_string())),
+            }
+        }
+        if data.is_empty() {
+            return Err(AppError::BadRequest("empty image".into()));
+        }
+        file = Some(data);
+    }
+
+    let data = file.ok_or_else(|| AppError::BadRequest("no images provided".into()))?;
+
+    // Run analysis off the async runtime (ORT / decode can block).
+    let engine = state.engine.clone();
+    let settings = state.settings.clone();
+    let preview = tokio::task::spawn_blocking(move || {
+        analyze_enrollment_preview(engine.as_ref(), settings.as_ref(), &data)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("preview analysis join failed: {e}")))?
+    .map_err(|e| match e {
+        FaceError::InvalidInput => AppError::BadRequest("unsupported or corrupt image".into()),
+        FaceError::NotReady => AppError::Internal("vision engine not ready".into()),
+        other => AppError::Internal(other.to_string()),
+    })?;
+
+    Ok(Json(json!({
+        "accepted": preview.accepted,
+        "reason": preview.reason,
+        "bbox": preview.bbox,
+        "yaw": preview.yaw,
+        "face_count": preview.face_count,
+    })))
+}
+
 pub async fn upload_images(
     State(state): State<AppState>,
     _auth: AuthUser,
@@ -378,7 +447,7 @@ pub async fn events(
     Query(q): Query<DateQuery>,
 ) -> Result<Json<Value>, AppError> {
     let mut sql = String::from(
-        "SELECT id, employee_id, camera_id, kind, score, ts, local_date FROM attendance_events WHERE 1=1",
+        "SELECT id, employee_id, camera_id, kind, score, ts, local_date, snapshot_path, snapshot_bbox_json FROM attendance_events WHERE 1=1",
     );
     if q.date.is_some() {
         sql.push_str(" AND local_date = ?");
@@ -399,18 +468,64 @@ pub async fn events(
         .iter()
         .map(|r| {
             let ts: String = r.get("ts");
+            let id: i64 = r.get("id");
+            let snapshot_path: Option<String> = r.get("snapshot_path");
+            let bbox_json: Option<String> = r.get("snapshot_bbox_json");
+            let snapshot_url = snapshot_path
+                .as_ref()
+                .map(|_| format!("/api/attendance/events/{id}/snapshot"));
+            let bbox = bbox_json
+                .as_ref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
             json!({
-                "id": r.get::<i64,_>("id"),
+                "id": id,
                 "employee_id": r.get::<Option<i64>,_>("employee_id"),
                 "camera_id": r.get::<String,_>("camera_id"),
                 "kind": r.get::<String,_>("kind"),
                 "score": r.get::<Option<f64>,_>("score"),
                 "ts": format!("{ts}Z"),
                 "local_date": r.get::<String,_>("local_date"),
+                "snapshot_url": snapshot_url,
+                "bbox": bbox,
             })
         })
         .collect();
     Ok(Json(Value::Array(out)))
+}
+
+/// Public JPEG snapshot for a committed attendance event (trusted-LAN visibility model).
+/// Resolves only DB-owned paths under DATA_DIR/events/; Cache-Control: no-store.
+pub async fn event_snapshot(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let meta = pksp_db::get_event_snapshot(&state.pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Not found".into()))?;
+    let rel = meta
+        .snapshot_path
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("Snapshot unavailable".into()))?;
+    let abs = pksp_db::resolve_event_snapshot_path(&state.settings, rel)
+        .map_err(|_| AppError::NotFound("Snapshot unavailable".into()))?;
+    let bytes = tokio::fs::read(&abs)
+        .await
+        .map_err(|_| AppError::NotFound("Snapshot unavailable".into()))?;
+    let mut res = Response::new(Body::from(bytes));
+    *res.status_mut() = StatusCode::OK;
+    res.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "image/jpeg".parse().unwrap(),
+    );
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    res.headers_mut().insert(
+        axum::http::header::HeaderName::from_static("x-content-type-options"),
+        "nosniff".parse().unwrap(),
+    );
+    Ok(res)
 }
 
 pub async fn list_cameras_route(

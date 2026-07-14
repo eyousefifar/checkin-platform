@@ -24,9 +24,30 @@ export type AttendanceMsg = {
   name: string;
   kind: string;
   camera_id: string;
-  score: number;
+  score: number | null;
   ts: number;
+  /** Additive: public snapshot path when available. */
+  snapshot_url?: string | null;
+  /** Additive: normalized face bbox [x1,y1,x2,y2] when snapshot exists. */
+  bbox?: [number, number, number, number] | null;
 };
+
+/** Response from authenticated POST `/api/enrollment/analyze`. */
+export type EnrollmentAnalyzeResult = {
+  accepted: boolean;
+  reason: string | null;
+  bbox: [number, number, number, number] | null;
+  yaw: number | null;
+  face_count: number;
+};
+
+/** Pose slot for guided enrollment capture. */
+export type PoseSlotId =
+  | "center"
+  | "slight_left"
+  | "left"
+  | "slight_right"
+  | "right";
 
 export type MetricsMsg = {
   type: "metrics";
@@ -100,6 +121,10 @@ export type RawAttendanceEvent = {
   /** UTC ISO timestamp (API appends Z). */
   ts: string;
   local_date: string;
+  /** Additive: public snapshot path when available. */
+  snapshot_url?: string | null;
+  /** Additive: normalized face bbox when snapshot exists. */
+  bbox?: [number, number, number, number] | null;
 };
 
 /** Camera row from public `/api/health` (no source URLs). */

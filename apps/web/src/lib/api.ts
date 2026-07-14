@@ -50,3 +50,25 @@ export { API_URL };
 export function wsUrl(): string {
   return process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api/ws/live";
 }
+
+/** Absolute URL for a relative snapshot path from the API. */
+export function snapshotAbsoluteUrl(snapshotUrl: string): string {
+  if (snapshotUrl.startsWith("http://") || snapshotUrl.startsWith("https://")) {
+    return snapshotUrl;
+  }
+  return `${API_URL}${snapshotUrl.startsWith("/") ? "" : "/"}${snapshotUrl}`;
+}
+
+/**
+ * Analyze one enrollment candidate frame (multipart file).
+ * Uses the same auth + body rules as enrollment upload.
+ */
+export async function analyzeEnrollmentFrame(
+  file: Blob,
+  filename = "frame.jpg",
+  signal?: AbortSignal,
+): Promise<import("./types").EnrollmentAnalyzeResult> {
+  const fd = new FormData();
+  fd.append("file", file, filename);
+  return api("/api/enrollment/analyze", { method: "POST", body: fd, signal });
+}

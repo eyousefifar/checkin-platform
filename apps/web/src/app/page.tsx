@@ -3,7 +3,6 @@
 import { useMemo } from "react";
 import { CameraTile } from "@/components/CameraTile";
 import { EventTicker } from "@/components/EventTicker";
-import { MetricPill } from "@/components/MetricPill";
 import { useHealth } from "@/hooks/useHealth";
 import { useLiveWs } from "@/hooks/useLiveWs";
 import type { HealthCamera } from "@/lib/types";
@@ -32,21 +31,26 @@ export default function DashboardPage() {
       ? metrics?.vision_fps?.[wallCameras[0].id]
       : undefined;
 
+  const camerasOnline =
+    metrics?.cameras_online ??
+    wallCameras.filter((c) => cameraOnline[c.id] === true).length;
+
   return (
-    <div className="dashboard-grid min-h-[calc(100vh-7rem)] min-w-0 p-4 md:p-6">
-      <div className="mb-4 flex min-w-0 flex-wrap items-end justify-between gap-3">
+    <div className="dashboard-grid flex min-h-[calc(100vh-4.5rem)] min-w-0 flex-col">
+      {/* Sparse mission header — not a marketing hero */}
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-hairline px-4 py-3 md:px-6">
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold uppercase tracking-wide text-ink">
+          <p className="text-[10px] font-bold uppercase tracking-label text-muted">
+            Monitor
+          </p>
+          <h1 className="text-lg font-bold uppercase tracking-wide text-ink md:text-xl">
             Live operations
           </h1>
-          <p className="mt-1 text-sm text-body">
-            On-prem vision · WebSocket HUD · no cloud face APIs
-          </p>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-4">
           {(healthRetrying || healthError) && (
             <div
-              className="text-xs font-bold uppercase tracking-label text-warning"
+              className="text-[10px] font-bold uppercase tracking-label text-warning"
               data-testid="health-retrying"
               role="status"
               aria-live="polite"
@@ -55,8 +59,8 @@ export default function DashboardPage() {
             </div>
           )}
           <div
-            className={`text-xs font-bold uppercase tracking-label ${
-              connected ? "text-success" : "text-warning"
+            className={`text-[10px] font-bold uppercase tracking-label ${
+              connected ? "text-signal" : "text-warning"
             }`}
             role="status"
             aria-live="polite"
@@ -67,28 +71,39 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <MetricPill
+      {/* Telemetry rail — sparse, not equal feature tiles */}
+      <div
+        className="flex min-w-0 flex-wrap items-stretch gap-0 border-b border-hairline font-mono text-xs"
+        data-testid="telemetry-rail"
+        role="group"
+        aria-label="Live telemetry"
+      >
+        <TelemetryCell
           label="Cameras"
-          value={
-            metrics?.cameras_online ??
-            wallCameras.filter((c) => cameraOnline[c.id] === true).length
-          }
+          value={String(camerasOnline)}
+          testId="metric-Cameras"
         />
-        <MetricPill label="Present" value={metrics?.present_count ?? "—"} />
-        <MetricPill
+        <TelemetryCell
+          label="Present"
+          value={metrics?.present_count != null ? String(metrics.present_count) : "—"}
+          testId="metric-Present"
+        />
+        <TelemetryCell
           label="Events today"
-          value={metrics?.events_today ?? "—"}
+          value={metrics?.events_today != null ? String(metrics.events_today) : "—"}
+          testId="metric-Events today"
         />
-        <MetricPill
+        <TelemetryCell
           label="Vision FPS"
           value={primaryFps != null ? primaryFps.toFixed(1) : "—"}
+          testId="metric-Vision FPS"
+          last
         />
       </div>
 
       {excessEnabled && (
         <div
-          className="mb-4 border border-warning/40 bg-warning/10 px-4 py-2 text-xs text-warning"
+          className="border-b border-warning/40 bg-warning/10 px-4 py-2 text-xs text-warning"
           data-testid="camera-cap-warning"
           role="status"
         >
@@ -97,11 +112,12 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="min-w-0 space-y-4 lg:col-span-2">
+      {/* Dominant camera wall + mission log */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
+        <div className="min-w-0 space-y-0 border-hairline lg:col-span-8 lg:border-r">
           {healthPending ? (
             <div
-              className="flex aspect-video w-full items-center justify-center border border-hairline bg-card"
+              className="flex aspect-video w-full items-center justify-center bg-card"
               data-testid="health-camera-state"
             >
               <div className="px-6 text-center">
@@ -116,10 +132,10 @@ export default function DashboardPage() {
             </div>
           ) : wallCameras.length === 0 ? (
             <div
-              className="flex aspect-video w-full items-center justify-center border border-hairline bg-card"
+              className="flex aspect-video w-full items-center justify-center bg-card"
               data-testid="no-enabled-cameras"
             >
-              <div className="max-w-md px-6 text-center">
+              <div className="px-6 text-center">
                 <div className="text-sm font-bold uppercase tracking-label text-ink">
                   No enabled cameras
                 </div>
@@ -135,8 +151,8 @@ export default function DashboardPage() {
             <div
               className={
                 wallCameras.length === 1
-                  ? "space-y-4"
-                  : "grid grid-cols-1 gap-4 md:grid-cols-2"
+                  ? "space-y-0"
+                  : "grid grid-cols-1 gap-0 md:grid-cols-2"
               }
               data-testid="camera-wall"
               data-camera-count={wallCameras.length}
@@ -156,9 +172,37 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
-        <div className="min-h-[320px] min-w-0 lg:min-h-0">
+
+        <div className="min-h-[280px] min-w-0 lg:col-span-4 lg:min-h-0">
           <EventTicker events={events} timezone={health?.timezone ?? null} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+function TelemetryCell({
+  label,
+  value,
+  last,
+  testId,
+}: {
+  label: string;
+  value: string;
+  last?: boolean;
+  testId: string;
+}) {
+  return (
+    <div
+      className={`min-w-[6.5rem] flex-1 px-4 py-2 ${
+        last ? "" : "border-r border-hairline"
+      }`}
+    >
+      <div className="text-[10px] font-bold uppercase tracking-label text-muted">
+        {label}
+      </div>
+      <div className="mt-0.5 text-lg text-ink" data-testid={testId}>
+        {value}
       </div>
     </div>
   );

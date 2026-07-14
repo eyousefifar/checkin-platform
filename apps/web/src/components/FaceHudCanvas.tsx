@@ -44,10 +44,10 @@ export function FaceHudCanvas({
       const known = !!f.employee_id && f.label !== "UNKNOWN" && f.label !== "AMBIGUOUS";
       const lowQ = !f.quality_ok;
       ctx.strokeStyle = lowQ
-        ? "rgba(126,126,126,0.8)"
+        ? "rgba(113,113,122,0.8)"
         : known
-          ? "rgba(28,105,212,0.95)"
-          : "rgba(255,255,255,0.75)";
+          ? "rgba(52,211,153,0.95)"
+          : "rgba(244,244,245,0.75)";
       ctx.lineWidth = 1.5;
       ctx.strokeRect(x, y, w, h);
 
@@ -66,7 +66,7 @@ export function FaceHudCanvas({
       const tw = ctx.measureText(label).width + 8;
       ctx.fillStyle = "rgba(0,0,0,0.75)";
       ctx.fillRect(x, Math.max(0, y - 18), tw, 16);
-      ctx.fillStyle = known ? "#e6e6e6" : "#7e7e7e";
+      ctx.fillStyle = known ? "#e4e4e7" : "#85858f";
       ctx.fillText(label, x + 4, Math.max(12, y - 6));
     }
   }, [faces, width, height]);

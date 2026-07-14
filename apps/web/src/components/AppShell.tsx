@@ -9,15 +9,15 @@ import { LicenseBanner } from "./LicenseBanner";
 import { MonoClock } from "./MonoClock";
 
 const NAV = [
-  { href: "/", label: "DASHBOARD" },
-  { href: "/employees", label: "EMPLOYEES" },
-  { href: "/attendance", label: "ATTENDANCE" },
+  { href: "/", label: "MONITOR" },
+  { href: "/employees", label: "CONFIGURE" },
+  { href: "/attendance", label: "RECORDS" },
 ];
 
 function navClass(active: boolean) {
-  return `text-sm tracking-wide transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark ${
+  return `text-xs tracking-label transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan ${
     active
-      ? "border-b-2 border-m-blue-dark pb-0.5 font-semibold text-ink"
+      ? "border-b border-cyan pb-0.5 font-semibold text-ink"
       : "text-body hover:text-ink"
   }`;
 }
@@ -38,6 +38,13 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { data: health } = useHealth();
 
+  const systemOk = health?.status === "ok" && health?.vision_ready;
+  const systemLabel = !health
+    ? "SYS —"
+    : systemOk
+      ? "SYS NOMINAL"
+      : "SYS DEGRADED";
+
   const links = NAV.map((item) => {
     const active =
       item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
@@ -55,14 +62,14 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen min-w-0 flex-col bg-canvas text-body-strong">
-      <div className="m-stripe" />
-      <header className="flex h-16 min-w-0 items-center justify-between border-b border-hairline px-4 md:px-6">
+      <div className="tech-rule" aria-hidden="true" />
+      <header className="flex h-14 min-w-0 items-center justify-between border-b border-hairline px-4 md:px-6">
         <div className="flex min-w-0 items-center gap-4 md:gap-8">
           <Link
             href="/"
-            className="shrink-0 text-sm font-bold uppercase tracking-label text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+            className="shrink-0 font-mono text-xs font-bold uppercase tracking-label text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
           >
-            PKSP CHECK-IN
+            PKSP<span className="text-cyan">/</span>OPS
           </Link>
           <nav className="hidden items-center gap-6 md:flex" aria-label="Main">
             {links}
@@ -70,26 +77,34 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex shrink-0 items-center gap-3 md:gap-4">
+          <div
+            className={`hidden font-mono text-[10px] uppercase tracking-label md:block ${
+              systemOk ? "text-signal" : "text-warning"
+            }`}
+            data-testid="system-status"
+            role="status"
+          >
+            {systemLabel}
+          </div>
           <div className="hidden md:block" aria-hidden="true">
             <MonoClock timezone={health?.timezone ?? null} />
           </div>
           <Link
             href="/login"
-            className="hidden text-sm uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark md:inline"
+            className="hidden text-xs uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan md:inline"
           >
-            Admin
+            Auth
           </Link>
 
-          {/* Native mobile navigation — no menu library */}
           <details className="relative md:hidden">
             <summary
-              className="cursor-pointer list-none border border-hairline px-3 py-2 text-sm font-bold uppercase tracking-label text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark [&::-webkit-details-marker]:hidden"
+              className="cursor-pointer list-none border border-hairline px-3 py-2 text-xs font-bold uppercase tracking-label text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan [&::-webkit-details-marker]:hidden"
               aria-label="Open navigation menu"
             >
               Menu
             </summary>
             <nav
-              className="absolute right-0 z-50 mt-2 min-w-[12rem] border border-hairline bg-card py-2 shadow-lg"
+              className="absolute right-0 z-50 mt-2 min-w-[12rem] border border-hairline bg-card py-2"
               aria-label="Mobile"
             >
               <div className="flex flex-col gap-1 px-3 py-1">
@@ -102,7 +117,7 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
                     <Link
                       key={item.href}
                       href={item.href}
-                      className={`px-2 py-2 text-sm uppercase tracking-wide focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark ${
+                      className={`px-2 py-2 text-xs uppercase tracking-label focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan ${
                         active
                           ? "font-semibold text-ink"
                           : "text-body hover:text-ink"
@@ -115,9 +130,9 @@ function AppShellContent({ children }: { children: React.ReactNode }) {
                 })}
                 <Link
                   href="/login"
-                  className="border-t border-hairline px-2 py-2 text-sm uppercase tracking-wide text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-m-blue-dark"
+                  className="border-t border-hairline px-2 py-2 text-xs uppercase tracking-label text-body hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan"
                 >
-                  Admin
+                  Auth
                 </Link>
               </div>
             </nav>

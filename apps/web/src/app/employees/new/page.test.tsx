@@ -7,6 +7,13 @@ const routerPush = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({
   api: (...args: unknown[]) => apiMock(...args),
   API_URL: "http://localhost:8000",
+  analyzeEnrollmentFrame: vi.fn().mockResolvedValue({
+    accepted: false,
+    reason: "no_face",
+    bbox: null,
+    yaw: null,
+    face_count: 0,
+  }),
 }));
 
 vi.mock("next/navigation", () => ({

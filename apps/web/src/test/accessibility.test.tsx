@@ -74,10 +74,10 @@ describe("AppShell mobile navigation", () => {
     fireEvent.click(openControl);
 
     const mobileNav = screen.getByLabelText("Mobile");
-    expect(within(mobileNav).getByRole("link", { name: "DASHBOARD" })).toBeTruthy();
-    expect(within(mobileNav).getByRole("link", { name: "EMPLOYEES" })).toBeTruthy();
-    expect(within(mobileNav).getByRole("link", { name: "ATTENDANCE" })).toBeTruthy();
-    expect(within(mobileNav).getByRole("link", { name: "Admin" })).toBeTruthy();
+    expect(within(mobileNav).getByRole("link", { name: "MONITOR" })).toBeTruthy();
+    expect(within(mobileNav).getByRole("link", { name: "CONFIGURE" })).toBeTruthy();
+    expect(within(mobileNav).getByRole("link", { name: "RECORDS" })).toBeTruthy();
+    expect(within(mobileNav).getByRole("link", { name: "Auth" })).toBeTruthy();
   });
 });
 

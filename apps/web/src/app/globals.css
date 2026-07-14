@@ -3,53 +3,56 @@
 @tailwind utilities;
 
 :root {
-  --canvas: #000000;
-  --surface-card: #1a1a1a;
-  --surface-elevated: #262626;
-  --ink: #ffffff;
-  --body: #bbbbbb;
-  --muted: #7e7e7e;
-  --hairline: #3c3c3c;
-  --m-blue-light: #0066b1;
-  --m-blue-dark: #1c69d4;
-  --m-red: #e22718;
-  --success: #0fa336;
-  --warning: #f4b400;
+  --canvas: #050505;
+  --surface-card: #111113;
+  --surface-elevated: #1a1a1e;
+  --surface-soft: #0a0a0b;
+  --ink: #f4f4f5;
+  --body: #a1a1aa;
+  --body-strong: #e4e4e7;
+  --muted: #85858f;
+  --hairline: #3f3f46;
+  --cyan: #22d3ee;
+  --signal: #34d399;
+  --danger: #f87171;
+  --warning: #fbbf24;
 }
 
 html,
 body {
   background: var(--canvas);
-  color: var(--body-strong, #e6e6e6);
+  color: var(--body-strong);
   min-height: 100%;
-  /* Keep document overflow local; tables/shell own their own scroll. */
   overflow-x: clip;
   max-width: 100%;
 }
 
 body {
-  font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
+  /* ponytail: keep on-prem builds offline; bundle Plex locally if exact metrics matter. */
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
-/* Subtle dashboard vignette */
+/* Sparse technical field — not a decorative card grid */
 .dashboard-grid {
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: 48px 48px;
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 64px 64px;
 }
 
-.m-stripe {
-  height: 3px;
+/* Thin technical rule — mission header accent */
+.tech-rule {
+  height: 1px;
   background: linear-gradient(
     90deg,
-    #0066b1 0%,
-    #0066b1 33%,
-    #1c69d4 33%,
-    #1c69d4 66%,
-    #e22718 66%,
-    #e22718 100%
+    transparent 0%,
+    var(--cyan) 12%,
+    var(--hairline) 40%,
+    var(--hairline) 60%,
+    var(--signal) 88%,
+    transparent 100%
   );
+  opacity: 0.7;
 }
 
 .scanline::after {
@@ -64,7 +67,7 @@ body {
     rgba(0, 0, 0, 0.04) 2px,
     rgba(0, 0, 0, 0.04) 4px
   );
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 /* Corner brackets for camera tiles */
@@ -74,7 +77,7 @@ body {
   position: absolute;
   width: 18px;
   height: 18px;
-  border-color: rgba(255, 255, 255, 0.55);
+  border-color: rgba(244, 244, 245, 0.55);
   border-style: solid;
   pointer-events: none;
   z-index: 20;
@@ -94,7 +97,7 @@ body {
   position: absolute;
   width: 18px;
   height: 18px;
-  border-color: rgba(255, 255, 255, 0.55);
+  border-color: rgba(244, 244, 245, 0.55);
   border-style: solid;
   pointer-events: none;
   z-index: 20;
@@ -107,4 +110,40 @@ body {
 .hud-brackets .bracket-br {
   right: 8px;
   border-width: 0 1px 1px 0;
+}
+
+/* Guided capture + match reveal scan sweeps */
+@keyframes pksp-scan-y {
+  0% {
+    top: 8%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    top: 92%;
+    opacity: 0;
+  }
+}
+
+.capture-scan,
+.reveal-scan {
+  animation: pksp-scan-y 2.4s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capture-scan,
+  .reveal-scan,
+  .scanline::after {
+    animation: none !important;
+  }
+  .capture-scan,
+  .reveal-scan {
+    top: 50%;
+    opacity: 0.35;
+  }
 }
