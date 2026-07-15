@@ -36,7 +36,7 @@ export JWT_SECRET=<generate-at-least-32-bytes>
 export APP_TIMEZONE=Asia/Tehran
 export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
 export BIND_ADDR=127.0.0.1:8000
-export CAM_IN_WEBRTC_PATH=demo
+export CAM_IN_WEBRTC_PATH=cam_in
 # optional: MEDIAMTX_BIN=mediamtx MEDIAMTX_CONFIG=../../configs/mediamtx.yml
 
 ./target/debug/pksp serve

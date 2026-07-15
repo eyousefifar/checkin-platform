@@ -21,7 +21,7 @@ export CAM_IN_RTSP=rtsp://127.0.0.1:8554/cam_in
 export ENABLE_SMART_SCENE=true
 export ZONE_CONFIG_DIR=./configs
 export BIND_ADDR=127.0.0.1:8000  # non-loopback requires explicit ADMIN_PASSWORD + JWT_SECRET (≥32)
-export CAM_IN_WEBRTC_PATH=demo   # or cam_in_h264 after transcoder
+export CAM_IN_WEBRTC_PATH=cam_in   # same path as RTSP publisher; cam_in_h264 after transcoder
 # ADMIN_PASSWORD and JWT_SECRET must come from a private EnvironmentFile / .env (0600)
 
 # 4. Run
@@ -43,7 +43,7 @@ Set an explicit publication mode (no auto-inference from URL contents):
 ```bash
 # Default: MediaMTX only (demo publisher or external process)
 export MEDIA_SOURCE_MODE=external
-export CAM_IN_WEBRTC_PATH=demo
+export CAM_IN_WEBRTC_PATH=cam_in
 
 # Native H.264 substream → stream-copy into cam_in_h264 (private .env only):
 # export MEDIA_SOURCE_MODE=copy

@@ -112,7 +112,9 @@ impl Settings {
             app_timezone: env_or("APP_TIMEZONE", "Asia/Tehran"),
             cam_in_rtsp: env_or("CAM_IN_RTSP", ""),
             cam_out_rtsp: env_or("CAM_OUT_RTSP", ""),
-            cam_in_webrtc_path: env_or("CAM_IN_WEBRTC_PATH", "demo"),
+            // Default matches CAM_IN path name so vision RTSP + browser WHEP stay aligned
+            // for real cameras and local MediaMTX publishers (demo stack uses cam_in too).
+            cam_in_webrtc_path: env_or("CAM_IN_WEBRTC_PATH", "cam_in"),
             cam_out_webrtc_path: env_or("CAM_OUT_WEBRTC_PATH", "cam_out"),
             cam_in_direction: env_or("CAM_IN_DIRECTION", "bidirectional"),
             cam_out_direction: env_or("CAM_OUT_DIRECTION", "out"),
