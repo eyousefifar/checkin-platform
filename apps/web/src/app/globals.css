@@ -135,6 +135,15 @@ body {
   animation: pksp-scan-y 2.4s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) infinite;
 }
 
+/* Soften discrete server bbox updates between analyze ticks */
+.capture-bbox {
+  transition:
+    left 100ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+    top 100ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+    width 100ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1)),
+    height 100ms var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
 @media (prefers-reduced-motion: reduce) {
   .capture-scan,
   .reveal-scan,
@@ -145,5 +154,8 @@ body {
   .reveal-scan {
     top: 50%;
     opacity: 0.35;
+  }
+  .capture-bbox {
+    transition: none;
   }
 }

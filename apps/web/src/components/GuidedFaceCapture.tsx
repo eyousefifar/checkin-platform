@@ -3,6 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { analyzeEnrollmentFrame } from "@/lib/api";
 import type { EnrollmentAnalyzeResult, PoseSlotId } from "@/lib/types";
+import {
+  advanceStability,
+  type BBox,
+  faceGuideScore,
+  idleStability,
+  shouldUpdateStatus,
+  smoothBbox,
+  smoothYaw,
+  type StabilityState,
+  yawMatchesSlot as yawMatchesSlotMath,
+} from "./guidedCaptureMath";
 
 /**
  * Outer |yaw| for guided bins. Must stay strictly under the server default
@@ -21,36 +32,37 @@ export const POSE_SLOTS: {
   {
     id: "center",
     label: "CENTER",
-    yawMin: -6,
-    yawMax: 6,
+    // Slightly wider entry so frontal hold is easy; side bins start outside.
+    yawMin: -8,
+    yawMax: 8,
     prompt: "Face the camera · hold steady",
   },
   {
     id: "slight_left",
     label: "S-LEFT",
-    yawMin: 6,
-    yawMax: 16,
+    yawMin: 8,
+    yawMax: 18,
     prompt: "Turn slightly left · nose toward left edge",
   },
   {
     id: "left",
     label: "LEFT",
-    yawMin: 16,
+    yawMin: 18,
     yawMax: POSE_BIN_LIMIT,
     prompt: "Turn further left · stay inside pose limit",
   },
   {
     id: "slight_right",
     label: "S-RIGHT",
-    yawMin: -16,
-    yawMax: -6,
+    yawMin: -18,
+    yawMax: -8,
     prompt: "Turn slightly right · nose toward right edge",
   },
   {
     id: "right",
     label: "RIGHT",
     yawMin: -POSE_BIN_LIMIT,
-    yawMax: -16,
+    yawMax: -18,
     prompt: "Turn further right · stay inside pose limit",
   },
 ];
@@ -70,6 +82,8 @@ type Props = {
   onCapturedChange: (files: File[]) => void;
   disabled?: boolean;
 };
+
+type GuideUiState = "idle" | "align" | "ready" | "locking";
 
 function reasonGuidance(reason: string | null | undefined): string {
   switch (reason) {
@@ -94,15 +108,13 @@ function reasonGuidance(reason: string | null | undefined): string {
   }
 }
 
-function yawMatchesSlot(
+/** Re-export with component slot type for tests and external callers. */
+export function yawMatchesSlot(
   yaw: number | null,
   slot: (typeof POSE_SLOTS)[number],
+  opts?: { sticky?: boolean; holdPad?: number },
 ): boolean {
-  // Without landmarks, only center can be accepted (model treats as frontal).
-  if (yaw == null) {
-    return slot.id === "center";
-  }
-  return yaw >= slot.yawMin && yaw <= slot.yawMax;
+  return yawMatchesSlotMath(yaw, slot, opts);
 }
 
 export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
@@ -115,15 +127,54 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
   const lastCaptureRef = useRef(0);
   const capturedRef = useRef<CapturedPose[]>([]);
 
+  // Temporal filters + lock state (refs so the preview loop stays stable).
+  const smoothBboxRef = useRef<BBox | null>(null);
+  const smoothYawRef = useRef<number | null>(null);
+  const stabilityRef = useRef<StabilityState>(idleStability());
+  const poseStickyRef = useRef(false);
+  const statusTextRef = useRef("Start camera to begin guided capture");
+  const statusChangedAtRef = useRef(0);
+
   const [cameraState, setCameraState] = useState<
     "idle" | "starting" | "live" | "denied" | "error"
   >("idle");
   const [cameraError, setCameraError] = useState("");
   const [preview, setPreview] = useState<EnrollmentAnalyzeResult | null>(null);
+  const [displayBbox, setDisplayBbox] = useState<BBox | null>(null);
+  const [displayYaw, setDisplayYaw] = useState<number | null>(null);
   const [statusText, setStatusText] = useState("Start camera to begin guided capture");
+  const [lockProgress, setLockProgress] = useState(0);
+  const [guideState, setGuideState] = useState<GuideUiState>("idle");
   const [captured, setCaptured] = useState<CapturedPose[]>([]);
   const [activeSlotIndex, setActiveSlotIndex] = useState(0);
   const [videoAspect, setVideoAspect] = useState(4 / 3);
+
+  const pushStatus = useCallback((next: string) => {
+    const now = Date.now();
+    if (
+      shouldUpdateStatus(
+        statusTextRef.current,
+        next,
+        statusChangedAtRef.current,
+        now,
+      )
+    ) {
+      statusTextRef.current = next;
+      statusChangedAtRef.current = now;
+      setStatusText(next);
+    }
+  }, []);
+
+  const resetTracking = useCallback(() => {
+    smoothBboxRef.current = null;
+    smoothYawRef.current = null;
+    stabilityRef.current = idleStability();
+    poseStickyRef.current = false;
+    setDisplayBbox(null);
+    setDisplayYaw(null);
+    setLockProgress(0);
+    setGuideState("idle");
+  }, []);
 
   const stopCamera = useCallback(() => {
     cameraRequestRef.current += 1;
@@ -138,8 +189,9 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    resetTracking();
     setCameraState((s) => (s === "live" || s === "starting" ? "idle" : s));
-  }, []);
+  }, [resetTracking]);
 
   // Cleanup on unmount: stop stream + revoke object URLs.
   useEffect(() => {
@@ -166,6 +218,14 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
       stopCamera();
     }
   }, [activeSlotIndex, captured.length, stopCamera]);
+
+  // Reset hold when the operator advances to a new pose slot.
+  useEffect(() => {
+    stabilityRef.current = idleStability();
+    poseStickyRef.current = false;
+    setLockProgress(0);
+    setGuideState((g) => (g === "locking" ? "ready" : g));
+  }, [activeSlotIndex]);
 
   const emitFiles = useCallback(
     (list: CapturedPose[]) => {
@@ -199,7 +259,10 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
     const request = ++cameraRequestRef.current;
     setCameraError("");
     setPreview(null);
+    resetTracking();
     setCameraState("starting");
+    statusTextRef.current = "Requesting camera…";
+    statusChangedAtRef.current = Date.now();
     setStatusText("Requesting camera…");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -230,6 +293,8 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
       }
       syncVideoAspect();
       setCameraState("live");
+      statusTextRef.current = "Camera live · align face with target";
+      statusChangedAtRef.current = Date.now();
       setStatusText("Camera live · align face with target");
     } catch (err) {
       if (request !== cameraRequestRef.current) return;
@@ -243,16 +308,20 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
         setCameraError(
           "Camera permission denied. Allow camera access or use manual file upload below.",
         );
+        statusTextRef.current = "Camera permission denied";
+        statusChangedAtRef.current = Date.now();
         setStatusText("Camera permission denied");
       } else {
         setCameraState("error");
         setCameraError(
           err instanceof Error ? err.message : "Failed to open camera",
         );
+        statusTextRef.current = "Camera error";
+        statusChangedAtRef.current = Date.now();
         setStatusText("Camera error");
       }
     }
-  }, [disabled, syncVideoAspect]);
+  }, [disabled, resetTracking, syncVideoAspect]);
 
   const grabJpegBlob = useCallback(async (): Promise<Blob | null> => {
     const video = videoRef.current;
@@ -286,7 +355,7 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
     });
   }, []);
 
-  // Bounded preview loop: one in-flight request, fixed cadence.
+  // Bounded preview loop: one in-flight request, fixed cadence, stability lock.
   useEffect(() => {
     if (cameraState !== "live" || disabled) return;
     if (activeSlotIndex >= POSE_SLOTS.length) return;
@@ -308,34 +377,96 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
         const slot = POSE_SLOTS[activeSlotIndex];
         if (!slot) return;
 
+        const now = Date.now();
+
+        // --- Temporal filters ---
+        const nextBbox = result.bbox as BBox | null;
+        const nextYaw = result.yaw;
+        if (!result.bbox) {
+          smoothBboxRef.current = null;
+          smoothYawRef.current = null;
+        } else {
+          smoothBboxRef.current = smoothBbox(smoothBboxRef.current, nextBbox);
+          smoothYawRef.current = smoothYaw(smoothYawRef.current, nextYaw);
+        }
+        const sBbox = smoothBboxRef.current;
+        const sYaw = smoothYawRef.current;
+        setDisplayBbox(sBbox);
+        setDisplayYaw(sYaw);
+
+        const breakLock = (message: string, guide: GuideUiState = "align") => {
+          stabilityRef.current = idleStability();
+          poseStickyRef.current = false;
+          setLockProgress(0);
+          setGuideState(guide);
+          pushStatus(message);
+        };
+
         if (!result.accepted) {
-          setStatusText(reasonGuidance(result.reason));
+          breakLock(reasonGuidance(result.reason), result.face_count > 0 ? "align" : "idle");
           return;
         }
 
-        if (!yawMatchesSlot(result.yaw, slot)) {
-          setStatusText(slot.prompt);
+        // Soft framing guidance (generous). Required for lock, not a hard reject forever.
+        const guide = faceGuideScore(sBbox);
+        if (!guide.ok) {
+          breakLock(guide.hint ?? "Align face with target", "align");
           return;
         }
+
+        // Pose match with hysteresis once the operator has entered the bin.
+        const inPose = yawMatchesSlot(sYaw, slot, {
+          sticky: poseStickyRef.current,
+        });
+        if (!inPose) {
+          // Allow entry without sticky; if sticky drops, clear it.
+          const entry = yawMatchesSlot(sYaw, slot, { sticky: false });
+          if (!entry) {
+            poseStickyRef.current = false;
+            breakLock(slot.prompt, "ready");
+            return;
+          }
+        }
+        poseStickyRef.current = true;
 
         // Already have this slot?
         if (capturedRef.current.some((c) => c.slot === slot.id)) {
-          setStatusText("Pose acquired · next");
+          stabilityRef.current = idleStability();
+          setLockProgress(0);
+          setGuideState("ready");
+          pushStatus("Pose acquired · next");
           return;
         }
 
-        const now = Date.now();
         if (now - lastCaptureRef.current < CAPTURE_COOLDOWN_MS) {
-          setStatusText("Hold… locking pose");
+          stabilityRef.current = idleStability();
+          setLockProgress(0);
+          setGuideState("ready");
+          pushStatus("Hold… next pose ready");
           return;
         }
 
-        // Capture: re-encode current frame as File
+        // Hold-to-lock stability
+        const nextStab = advanceStability(stabilityRef.current, true, now);
+        stabilityRef.current = nextStab;
+        setLockProgress(nextStab.progress);
+        setGuideState(nextStab.progress > 0 ? "locking" : "ready");
+
+        if (!nextStab.locked) {
+          pushStatus("Hold steady · locking");
+          return;
+        }
+
+        // Capture: encode the current (raw) accepted frame as File
         const file = new File([blob], `pose-${slot.id}.jpg`, {
           type: "image/jpeg",
         });
         const url = URL.createObjectURL(file);
         lastCaptureRef.current = now;
+        stabilityRef.current = idleStability();
+        poseStickyRef.current = false;
+        setLockProgress(0);
+        setGuideState("ready");
         const next = [
           ...capturedRef.current.filter((c) => c.slot !== slot.id),
           { slot: slot.id, file, url },
@@ -347,12 +478,17 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
             POSE_SLOTS.findIndex((s) => s.id === b.slot),
         );
         setCapturedAndEmit(next);
+        // Force status for capture (category change)
+        statusTextRef.current = `${slot.label} captured`;
+        statusChangedAtRef.current = now;
         setStatusText(`${slot.label} captured`);
       } catch (err) {
         if (ac.signal.aborted) return;
         // Soft-fail preview; keep camera running
         const msg = err instanceof Error ? err.message : "Preview failed";
-        setStatusText(msg);
+        stabilityRef.current = idleStability();
+        setLockProgress(0);
+        pushStatus(msg);
       } finally {
         if (abortRef.current === ac) {
           abortRef.current = null;
@@ -376,6 +512,7 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
     activeSlotIndex,
     grabJpegBlob,
     setCapturedAndEmit,
+    pushStatus,
   ]);
 
   function removeSlot(slot: PoseSlotId) {
@@ -383,12 +520,26 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
     if (prev) URL.revokeObjectURL(prev.url);
     const next = capturedRef.current.filter((c) => c.slot !== slot);
     setCapturedAndEmit(next);
+    stabilityRef.current = idleStability();
+    poseStickyRef.current = false;
+    setLockProgress(0);
+    statusTextRef.current = `Retake ${slot.replace("_", " ")}`;
+    statusChangedAtRef.current = Date.now();
     setStatusText(`Retake ${slot.replace("_", " ")}`);
   }
 
   const complete = activeSlotIndex >= POSE_SLOTS.length && captured.length === POSE_SLOTS.length;
-  const bbox = preview?.bbox;
+  const bbox = displayBbox;
   const filled = new Set(captured.map((c) => c.slot));
+
+  const guideBorderClass =
+    guideState === "locking"
+      ? "border-signal"
+      : guideState === "ready"
+        ? "border-cyan"
+        : guideState === "align"
+          ? "border-ink/70"
+          : "border-ink/50";
 
   return (
     <div
@@ -456,22 +607,32 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
         />
         <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
 
-        {/* Face target frame */}
+        {/* Face target frame — color reflects alignment / lock state */}
         <div
-          className="pointer-events-none absolute left-1/2 top-1/2 h-[55%] w-[42%] -translate-x-1/2 -translate-y-1/2 border border-ink/50"
+          className={`pointer-events-none absolute left-1/2 top-1/2 h-[55%] w-[42%] -translate-x-1/2 -translate-y-1/2 border ${guideBorderClass}`}
           data-testid="face-target"
+          data-guide-state={guideState}
           aria-hidden="true"
         >
           <span className="absolute -left-px -top-px h-3 w-3 border-l border-t border-cyan" />
           <span className="absolute -right-px -top-px h-3 w-3 border-r border-t border-cyan" />
           <span className="absolute -bottom-px -left-px h-3 w-3 border-b border-l border-cyan" />
           <span className="absolute -bottom-px -right-px h-3 w-3 border-b border-r border-cyan" />
+          {/* Lock progress fill */}
+          {lockProgress > 0 && cameraState === "live" && (
+            <div
+              className="absolute inset-x-0 bottom-0 bg-signal/25"
+              style={{ height: `${Math.round(lockProgress * 100)}%` }}
+              data-testid="lock-progress-fill"
+              aria-hidden="true"
+            />
+          )}
         </div>
 
-        {/* Live server bbox (mirrored to match video) */}
+        {/* Live smoothed bbox (mirrored to match video) */}
         {bbox && cameraState === "live" && (
           <div
-            className="pointer-events-none absolute border border-signal/80"
+            className="capture-bbox pointer-events-none absolute border border-signal/80"
             data-testid="live-bbox"
             style={{
               left: `${(1 - bbox[2]) * 100}%`,
@@ -502,9 +663,26 @@ export function GuidedFaceCapture({ onCapturedChange, disabled }: Props) {
               ? "All five poses acquired · ready to enroll"
               : statusText}
           </p>
-          {preview?.yaw != null && (
+          {cameraState === "live" && lockProgress > 0 && !complete && (
+            <div
+              className="mx-auto mt-2 h-1 w-2/3 overflow-hidden bg-ink/20"
+              data-testid="lock-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(lockProgress * 100)}
+              aria-label="Pose lock progress"
+            >
+              <div
+                className="h-full bg-signal transition-[width] duration-150"
+                style={{ width: `${Math.round(lockProgress * 100)}%` }}
+              />
+            </div>
+          )}
+          {displayYaw != null && (
             <p className="mt-1 text-center font-mono text-[10px] uppercase tracking-label text-muted">
-              yaw {preview.yaw.toFixed(1)}° · faces {preview.face_count}
+              yaw {displayYaw.toFixed(1)}°
+              {preview?.face_count != null ? ` · faces ${preview.face_count}` : ""}
             </p>
           )}
         </div>

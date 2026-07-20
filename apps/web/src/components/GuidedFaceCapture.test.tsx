@@ -107,12 +107,12 @@ describe("GuidedFaceCapture", () => {
     });
   });
 
-  it("captures accepted center pose and progresses slots", async () => {
+  it("captures accepted center pose after stability hold and progresses slots", async () => {
     const onChange = vi.fn();
     analyzeMock.mockResolvedValue({
       accepted: true,
       reason: null,
-      bbox: [0.2, 0.2, 0.8, 0.8],
+      bbox: [0.25, 0.2, 0.75, 0.8],
       yaw: 0,
       face_count: 1,
     });
@@ -123,18 +123,60 @@ describe("GuidedFaceCapture", () => {
       expect(screen.getByTestId("stop-camera")).toBeTruthy();
     });
 
+    // Stability hold (~800ms) + preview cadence — allow enough wall time.
     await waitFor(
       () => {
         expect(screen.getByTestId("pose-slot-center").getAttribute("data-state")).toBe(
           "done",
         );
       },
-      { timeout: 3000 },
+      { timeout: 5000 },
     );
     expect(onChange).toHaveBeenCalled();
     const files = onChange.mock.calls.at(-1)?.[0] as File[];
     expect(files.length).toBeGreaterThanOrEqual(1);
     expect(files[0].name).toContain("center");
+  });
+
+  it("does not capture on a single flash-good frame without hold", async () => {
+    const onChange = vi.fn();
+    let calls = 0;
+    analyzeMock.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          accepted: true,
+          reason: null,
+          bbox: [0.25, 0.2, 0.75, 0.8],
+          yaw: 0,
+          face_count: 1,
+        };
+      }
+      // Subsequent frames lose the face — hold must reset
+      return {
+        accepted: false,
+        reason: "no_face",
+        bbox: null,
+        yaw: null,
+        face_count: 0,
+      };
+    });
+
+    render(<GuidedFaceCapture onCapturedChange={onChange} />);
+    fireEvent.click(screen.getByTestId("start-camera"));
+    await waitFor(() => expect(screen.getByTestId("stop-camera")).toBeTruthy());
+
+    // Wait longer than one interval but less than a full successful hold chain
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 700));
+    });
+
+    expect(screen.getByTestId("pose-slot-center").getAttribute("data-state")).not.toBe(
+      "done",
+    );
+    // onChange may be called with [] never — or not at all
+    const lastFiles = onChange.mock.calls.at(-1)?.[0] as File[] | undefined;
+    expect(lastFiles?.length ?? 0).toBe(0);
   });
 
   it("shows rejection guidance for no_face without capturing", async () => {
@@ -238,7 +280,7 @@ describe("GuidedFaceCapture", () => {
     analyzeMock.mockResolvedValue({
       accepted: true,
       reason: null,
-      bbox: [0.2, 0.2, 0.8, 0.8],
+      bbox: [0.25, 0.2, 0.75, 0.8],
       yaw: 0,
       face_count: 1,
     });
@@ -249,7 +291,7 @@ describe("GuidedFaceCapture", () => {
       () => {
         expect(screen.getByTestId("retake-center")).toBeTruthy();
       },
-      { timeout: 3000 },
+      { timeout: 5000 },
     );
     fireEvent.click(screen.getByTestId("retake-center"));
     await waitFor(() => {
